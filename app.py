@@ -357,14 +357,16 @@ elif analysis_mode == "Intraday Profiles":
         # Add Midnight Open Line
         fig.add_hline(y=res['Midnight_Open'], line_dash="dot", line_color="white", annotation_text="Midnight Open")
         
-        # Add Vertical Lines for Time Zones
-        # We need to construct the full datetime for the vertical lines on the selected date
+        # --- FIX: Convert Timestamps to Milliseconds for Plotly ---
         base_dt = pd.to_datetime(target_date).tz_localize('America/New_York') if df_intra['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date)
         
-        # 00:00 NY
-        t0 = base_dt.replace(hour=0, minute=0)
-        # 02:00 NY
-        t2 = base_dt.replace(hour=2, minute=0)
+        # Define 00:00 and 02:00
+        t0_ts = base_dt.replace(hour=0, minute=0)
+        t2_ts = base_dt.replace(hour=2, minute=0)
+        
+        # Convert to milliseconds for safely plotting vertical lines
+        t0 = t0_ts.timestamp() * 1000
+        t2 = t2_ts.timestamp() * 1000
         
         fig.add_vline(x=t0, line_dash="solid", line_color="gray", annotation_text="00:00 NY")
         fig.add_vline(x=t2, line_dash="solid", line_color="gray", annotation_text="02:00 NY")
