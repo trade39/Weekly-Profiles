@@ -54,9 +54,15 @@ ticker_symbol = asset_map[selected_asset_name]
 
 def get_data_weekly(ticker, weeks=52):
     """Fetches daily data for Weekly Analysis."""
-    period_days = weeks * 7 + 21
+    # OPTIMIZATION: Always fetch at least 5 years (260 weeks) to ensure 
+    # the Prediction Engine has enough data points.
+    min_history_weeks = 260 
+    fetch_weeks = max(weeks, min_history_weeks)
+    
+    period_days = fetch_weeks * 7 + 21
     end_date = datetime.now()
     start_date = end_date - timedelta(days=period_days)
+    
     try:
         data = yf.download(ticker, start=start_date, end=end_date, interval="1d", progress=False)
         if data.empty: return None
@@ -144,34 +150,16 @@ def calculate_seasonal_path(weeks_dict, lookback):
 
 # --- PREDICTION ENGINE (MARKOV CHAIN) ---
 def predict_next_week(stats_df, current_profile):
-    """
-    Calculates the probability of the NEXT week's profile based on the historical
-    sequence of profiles in stats_df.
-    """
     if stats_df.empty: return None
-    
-    # Ensure sorted by date (Oldest first for shift logic)
     df_sorted = stats_df.sort_values('Week Start', ascending=True).copy()
-    
-    # Create 'Next_Profile' column
     df_sorted['Next_Profile'] = df_sorted['Profile'].shift(-1)
-    
-    # Filter for instances where the profile matched the current one
-    # We exclude the very last row (which is current) because it has no 'Next' yet in history
     transitions = df_sorted[df_sorted['Profile'] == current_profile]
     
     if transitions.empty or transitions['Next_Profile'].dropna().empty:
         return None
     
-    # Calculate probabilities
     counts = transitions['Next_Profile'].value_counts(normalize=True)
-    
-    # Convert to simple dict
-    probs = counts.to_dict()
-    # Sort by probability descending
-    sorted_probs = dict(sorted(probs.items(), key=lambda item: item[1], reverse=True))
-    
-    return sorted_probs
+    return dict(sorted(counts.to_dict().items(), key=lambda item: item[1], reverse=True))
 
 # --- INTRADAY ANALYSIS FUNCTIONS ---
 def identify_intraday_profile(df):
@@ -210,11 +198,13 @@ if analysis_mode == "Weekly Profiles":
     
     st.sidebar.subheader("Weekly Settings")
     lookback_weeks = st.sidebar.slider("Weeks to Display", 1, 20, 4)
-    stats_lookback = st.sidebar.slider("Stats Range", 10, 104, 52)
+    # Default high for better prediction accuracy
+    stats_lookback = st.sidebar.slider("Stats Range (Prediction History)", 52, 300, 150)
     
     st.title(f"📊 Weekly Profile Identifier: {selected_asset_name}")
     
     with st.spinner(f"Fetching weekly data for {ticker_symbol}..."):
+        # Fetching extra data handled by get_data_weekly optimization
         df = get_data_weekly(ticker_symbol, max(lookback_weeks, stats_lookback) + 3)
 
     if df is not None:
@@ -226,6 +216,7 @@ if analysis_mode == "Weekly Profiles":
             st.error("No data.")
         else:
             stats_data = []
+            # Calculate stats over the full requested range
             for w_start in week_keys[:stats_lookback]:
                 w_df = weeks.get_group(w_start)
                 if len(w_df) >= 3:
@@ -234,7 +225,7 @@ if analysis_mode == "Weekly Profiles":
                     stats_data.append(res)
             stats_df = pd.DataFrame(stats_data)
 
-            tab1, tab2 = st.tabs(["🔎 Current Analysis", "📈 Statistical Probability"])
+            tab1, tab2 = st.tabs(["🔎 Current Analysis & Prediction", "📈 Statistical Probability"])
             
             with tab1:
                 sel_week = st.selectbox("Select Week", week_keys[:lookback_weeks], format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}")
@@ -253,23 +244,18 @@ if analysis_mode == "Weekly Profiles":
                 st.markdown(f"### 🔮 Predictive Analysis: What's Next?")
                 
                 if not stats_df.empty:
-                    # Calculate probabilities based on current profile
                     prediction = predict_next_week(stats_df, analysis['Profile'])
-                    
                     col_pred1, col_pred2 = st.columns([1, 2])
-                    
                     with col_pred1:
                         st.info(f"**Context:** You are viewing a **{analysis['Profile']}**.")
-                    
                     with col_pred2:
                         if prediction:
-                            st.write(f"Historically, following a **{analysis['Profile']}**, the next week results in:")
-                            # Display as progress bars
-                            for next_prof, prob in list(prediction.items())[:3]: # Top 3
+                            st.write(f"Historically (last {len(stats_df)} weeks), following this profile, the next week is:")
+                            for next_prof, prob in list(prediction.items())[:3]:
                                 st.caption(f"{next_prof} ({prob*100:.1f}%)")
                                 st.progress(prob)
                         else:
-                            st.warning("Not enough historical data to predict next week's profile.")
+                            st.warning("Not enough historical occurrences of this specific profile to predict the next week.")
                 st.markdown("---")
                 # --------------------------
                 
