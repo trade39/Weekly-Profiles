@@ -42,10 +42,17 @@ def get_data(ticker, weeks=12):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=period_days)
     
+    # Download data
     data = yf.download(ticker, start=start_date, end=end_date, interval="1d", progress=False)
     
     if data.empty:
         return None
+
+    # --- FIX: Flatten MultiIndex Columns ---
+    # Newer yfinance versions return columns like ('Open', 'GC=F'). We just want 'Open'.
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    # ---------------------------------------
 
     # Reset index to make Date a column
     data = data.reset_index()
@@ -54,8 +61,6 @@ def get_data(ticker, weeks=12):
     data['Date'] = pd.to_datetime(data['Date'])
     
     # Identify the start of the week (Monday) for grouping
-    # data['Date'].dt.to_period('W-SUN') could work, but let's be explicit
-    # Subtract weekday number from date to get Monday (0=Mon, 6=Sun)
     data['Week_Start'] = data['Date'].apply(lambda x: x - timedelta(days=x.weekday()))
     
     return data
@@ -69,8 +74,15 @@ def identify_profile(week_df):
         return {"Type": "Insufficient Data", "Desc": "No data available"}
 
     # Basic OHLC for the week
-    open_price = week_df.iloc[0]['Open']
-    close_price = week_df.iloc[-1]['Close']
+    # .item() is used to ensure we get a Python scalar, not a pandas Series, to avoid ambiguity errors
+    try:
+        open_price = week_df.iloc[0]['Open'].item()
+        close_price = week_df.iloc[-1]['Close'].item()
+    except AttributeError:
+        # Fallback if .item() isn't needed/available (older pandas versions)
+        open_price = week_df.iloc[0]['Open']
+        close_price = week_df.iloc[-1]['Close']
+
     high_price = week_df['High'].max()
     low_price = week_df['Low'].min()
     
@@ -79,9 +91,13 @@ def identify_profile(week_df):
     trend = "Bullish" if is_bullish else "Bearish"
     
     # Identify Day of Week for High and Low
-    # idxmax return the index, we need the row
+    # idxmax returns the index, we need the row
     high_date = week_df.loc[week_df['High'].idxmax(), 'Date']
     low_date = week_df.loc[week_df['Low'].idxmin(), 'Date']
+    
+    # Ensure we handle Scalar values if they are wrapped
+    if hasattr(high_date, 'item'): high_date = high_date.item()
+    if hasattr(low_date, 'item'): low_date = low_date.item()
     
     high_day = high_date.weekday() # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     low_day = low_date.weekday()
@@ -156,90 +172,97 @@ if df is not None:
     week_keys.sort(reverse=True) # Newest first
 
     # Select Week to Visualize
-    selected_week_start = st.selectbox(
-        "Select Week to View Chart", 
-        week_keys[:lookback_weeks],
-        format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}"
-    )
+    # Filter out empty keys if any
+    week_keys = [k for k in week_keys if not pd.isna(k)]
     
-    # Get Data for selected week
-    current_week_df = weeks.get_group(selected_week_start).copy()
-    
-    # Analyze Profile
-    analysis = identify_profile(current_week_df)
-    
-    # --- DISPLAY METRICS ---
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Weekly Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
-    col2.metric("Detected Profile", analysis["Profile"])
-    col3.metric("High Formed On", analysis["High_Day"])
-    col4.metric("Low Formed On", analysis["Low_Day"])
-    
-    st.info(f"**Logic:** {analysis['Description']}")
+    if not week_keys:
+        st.error("No valid weekly data found.")
+    else:
+        selected_week_start = st.selectbox(
+            "Select Week to View Chart", 
+            week_keys[:lookback_weeks],
+            format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}"
+        )
+        
+        # Get Data for selected week
+        current_week_df = weeks.get_group(selected_week_start).copy()
+        
+        # Analyze Profile
+        analysis = identify_profile(current_week_df)
+        
+        # --- DISPLAY METRICS ---
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Weekly Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
+        col2.metric("Detected Profile", analysis["Profile"])
+        col3.metric("High Formed On", analysis["High_Day"])
+        col4.metric("Low Formed On", analysis["Low_Day"])
+        
+        st.info(f"**Logic:** {analysis['Description']}")
 
-    # --- PLOT CHART ---
-    fig = go.Figure()
+        # --- PLOT CHART ---
+        fig = go.Figure()
 
-    # Candlestick
-    fig.add_trace(go.Candlestick(
-        x=current_week_df['Date'],
-        open=current_week_df['Open'],
-        high=current_week_df['High'],
-        low=current_week_df['Low'],
-        close=current_week_df['Close'],
-        name='Price'
-    ))
+        # Candlestick
+        fig.add_trace(go.Candlestick(
+            x=current_week_df['Date'],
+            open=current_week_df['Open'],
+            high=current_week_df['High'],
+            low=current_week_df['Low'],
+            close=current_week_df['Close'],
+            name='Price'
+        ))
 
-    # Markers for High and Low
-    # High Marker
-    max_high_idx = current_week_df['High'].idxmax()
-    fig.add_annotation(
-        x=current_week_df.loc[max_high_idx, 'Date'],
-        y=current_week_df.loc[max_high_idx, 'High'],
-        text="Weekly High",
-        showarrow=True,
-        arrowhead=1,
-        ax=0,
-        ay=-40
-    )
-    
-    # Low Marker
-    min_low_idx = current_week_df['Low'].idxmin()
-    fig.add_annotation(
-        x=current_week_df.loc[min_low_idx, 'Date'],
-        y=current_week_df.loc[min_low_idx, 'Low'],
-        text="Weekly Low",
-        showarrow=True,
-        arrowhead=1,
-        ax=0,
-        ay=40
-    )
+        # Markers for High and Low
+        # High Marker
+        max_high_idx = current_week_df['High'].idxmax()
+        fig.add_annotation(
+            x=current_week_df.loc[max_high_idx, 'Date'],
+            y=current_week_df.loc[max_high_idx, 'High'],
+            text="Weekly High",
+            showarrow=True,
+            arrowhead=1,
+            ax=0,
+            ay=-40
+        )
+        
+        # Low Marker
+        min_low_idx = current_week_df['Low'].idxmin()
+        fig.add_annotation(
+            x=current_week_df.loc[min_low_idx, 'Date'],
+            y=current_week_df.loc[min_low_idx, 'Low'],
+            text="Weekly Low",
+            showarrow=True,
+            arrowhead=1,
+            ax=0,
+            ay=40
+        )
 
-    fig.update_layout(
-        title=f"{selected_asset_name} - Week of {selected_week_start.strftime('%Y-%m-%d')}",
-        xaxis_title="Date / Time",
-        yaxis_title="Price",
-        xaxis_rangeslider_visible=False,
-        height=600,
-        template="plotly_dark"
-    )
+        fig.update_layout(
+            title=f"{selected_asset_name} - Week of {selected_week_start.strftime('%Y-%m-%d')}",
+            xaxis_title="Date / Time",
+            yaxis_title="Price",
+            xaxis_rangeslider_visible=False,
+            height=600,
+            template="plotly_dark"
+        )
 
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # --- HISTORICAL TABLE ---
-    st.subheader("Recent Weekly Profiles History")
-    
-    history_data = []
-    for w_start in week_keys[:lookback_weeks]:
-        w_df = weeks.get_group(w_start)
-        res = identify_profile(w_df)
-        res['Week Start'] = w_start.strftime('%Y-%m-%d')
-        history_data.append(res)
-    
-    history_df = pd.DataFrame(history_data)
-    # Reorder columns
-    history_df = history_df[['Week Start', 'Trend', 'Profile', 'High_Day', 'Low_Day']]
-    st.dataframe(history_df, use_container_width=True)
+        # --- HISTORICAL TABLE ---
+        st.subheader("Recent Weekly Profiles History")
+        
+        history_data = []
+        for w_start in week_keys[:lookback_weeks]:
+            w_df = weeks.get_group(w_start)
+            res = identify_profile(w_df)
+            res['Week Start'] = w_start.strftime('%Y-%m-%d')
+            history_data.append(res)
+        
+        history_df = pd.DataFrame(history_data)
+        # Reorder columns
+        if not history_df.empty:
+            history_df = history_df[['Week Start', 'Trend', 'Profile', 'High_Day', 'Low_Day']]
+            st.dataframe(history_df, use_container_width=True)
 
 else:
     st.error("Could not fetch data. Please check your connection or try again later.")
