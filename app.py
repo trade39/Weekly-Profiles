@@ -20,7 +20,7 @@ st.sidebar.title("Configuration")
 analysis_mode = st.sidebar.radio(
     "Analysis Mode", 
     ["Weekly Profiles", "Intraday Profiles", "One Shot One Kill (OSOK)"], 
-    help="Weekly: Swing profiles. Intraday: London Protraction. OSOK: 20-Week IPDA Range + OTE Setup."
+    help="Weekly: Swing profiles + Prediction. Intraday: London Protraction. OSOK: 20-Week IPDA Range."
 )
 
 # 2. Fallback Toggle
@@ -71,8 +71,7 @@ def get_data_weekly(ticker, weeks=52):
 
 def get_data_intraday(ticker, target_date, interval="5m"):
     """Fetches intraday data. Interval can be 5m (Intraday) or 15m (OSOK)."""
-    # Free yfinance 15m/5m data is limited to last 60 days.
-    start_date = target_date - timedelta(days=2) # Buffer
+    start_date = target_date - timedelta(days=2) 
     end_date = target_date + timedelta(days=2)
     
     try:
@@ -86,8 +85,6 @@ def get_data_intraday(ticker, target_date, interval="5m"):
         
         data['Datetime_NY'] = data['Datetime'].dt.tz_convert('America/New_York')
         
-        # Filter for the specific target date in NY time (or surrounding for context)
-        # For OSOK, we might want the whole week so far, but let's stick to the target date view for clarity
         mask = data['Datetime_NY'].dt.date == target_date
         return data.loc[mask].copy()
     except Exception as e:
@@ -144,6 +141,37 @@ def calculate_seasonal_path(weeks_dict, lookback):
             seasonal_data.append({"DayNum": row['Date'].weekday(), "PctChange": ((row['Close'] - mon_open) / mon_open) * 100, "DayName": row['Date'].strftime("%A")})
     if not seasonal_data: return None
     return pd.DataFrame(seasonal_data).groupby('DayNum').agg({'PctChange': 'mean', 'DayName': 'first'}).reset_index()
+
+# --- PREDICTION ENGINE (MARKOV CHAIN) ---
+def predict_next_week(stats_df, current_profile):
+    """
+    Calculates the probability of the NEXT week's profile based on the historical
+    sequence of profiles in stats_df.
+    """
+    if stats_df.empty: return None
+    
+    # Ensure sorted by date (Oldest first for shift logic)
+    df_sorted = stats_df.sort_values('Week Start', ascending=True).copy()
+    
+    # Create 'Next_Profile' column
+    df_sorted['Next_Profile'] = df_sorted['Profile'].shift(-1)
+    
+    # Filter for instances where the profile matched the current one
+    # We exclude the very last row (which is current) because it has no 'Next' yet in history
+    transitions = df_sorted[df_sorted['Profile'] == current_profile]
+    
+    if transitions.empty or transitions['Next_Profile'].dropna().empty:
+        return None
+    
+    # Calculate probabilities
+    counts = transitions['Next_Profile'].value_counts(normalize=True)
+    
+    # Convert to simple dict
+    probs = counts.to_dict()
+    # Sort by probability descending
+    sorted_probs = dict(sorted(probs.items(), key=lambda item: item[1], reverse=True))
+    
+    return sorted_probs
 
 # --- INTRADAY ANALYSIS FUNCTIONS ---
 def identify_intraday_profile(df):
@@ -219,6 +247,31 @@ if analysis_mode == "Weekly Profiles":
                 
                 curr_df = weeks.get_group(sel_week).copy()
                 analysis = identify_weekly_profile(curr_df)
+                
+                # --- PREDICTION SECTION ---
+                st.markdown("---")
+                st.markdown(f"### 🔮 Predictive Analysis: What's Next?")
+                
+                if not stats_df.empty:
+                    # Calculate probabilities based on current profile
+                    prediction = predict_next_week(stats_df, analysis['Profile'])
+                    
+                    col_pred1, col_pred2 = st.columns([1, 2])
+                    
+                    with col_pred1:
+                        st.info(f"**Context:** You are viewing a **{analysis['Profile']}**.")
+                    
+                    with col_pred2:
+                        if prediction:
+                            st.write(f"Historically, following a **{analysis['Profile']}**, the next week results in:")
+                            # Display as progress bars
+                            for next_prof, prob in list(prediction.items())[:3]: # Top 3
+                                st.caption(f"{next_prof} ({prob*100:.1f}%)")
+                                st.progress(prob)
+                        else:
+                            st.warning("Not enough historical data to predict next week's profile.")
+                st.markdown("---")
+                # --------------------------
                 
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
@@ -334,21 +387,16 @@ elif analysis_mode == "Intraday Profiles":
 
 elif analysis_mode == "One Shot One Kill (OSOK)":
     
-    # --- OSOK LOGIC ---
     st.sidebar.subheader("OSOK Settings")
     st.title("🎯 One Shot One Kill (OSOK) Model")
     st.markdown("Identifies the **20-Week Dealing Range** and potential **OTE Setups**.")
 
-    # 1. Fetch Weekly Data (Last 25 weeks to ensure 20 lookback)
     with st.spinner("Analyzing 20-Week IPDA Range..."):
         df_weekly = get_data_weekly(ticker_symbol, weeks=25)
     
     if df_weekly is not None:
-        # Sort by date
         df_weekly = df_weekly.sort_values('Date')
-        
-        # Get last 20 weeks (excluding current if incomplete, but usually we include recent closed)
-        last_20 = df_weekly.iloc[-21:-1] # Taking last 20 completed weeks usually
+        last_20 = df_weekly.iloc[-21:-1]
         current_week = df_weekly.iloc[-1]
         
         ipda_high = last_20['High'].max()
@@ -356,11 +404,9 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         ipda_range = ipda_high - ipda_low
         equilibrium = (ipda_high + ipda_low) / 2
         
-        # Current Price Position
         current_close = current_week['Close']
         in_premium = current_close > equilibrium
         
-        # Metrics Display
         m1, m2, m3 = st.columns(3)
         m1.metric("20-Week High (Liquidity)", f"{ipda_high:.2f}")
         m2.metric("20-Week Low (Liquidity)", f"{ipda_low:.2f}")
@@ -371,8 +417,6 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         st.caption(f"Price is at {((current_close - ipda_low) / ipda_range)*100:.1f}% of the 20-week range.")
 
         st.divider()
-        
-        # 2. Intraday Setup View (15m Chart)
         st.subheader("Execution: 15m OTE Setup")
         
         today = datetime.now().date()
@@ -381,46 +425,32 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         df_15m = get_data_intraday(ticker_symbol, target_date_osok, interval="15m")
         
         if df_15m is not None and not df_15m.empty:
-            
-            # Identify Day of Week
             day_name = pd.to_datetime(target_date_osok).strftime("%A")
             is_anchor_day = day_name in ["Monday", "Tuesday", "Wednesday"]
             
             status_color = "green" if is_anchor_day else "orange"
             st.markdown(f"**Day:** {day_name} (:{status_color}[{'Anchor Point Potential' if is_anchor_day else 'Standard Trading Day'}])")
             
-            # --- Charting ---
             fig_osok = go.Figure()
             fig_osok.add_trace(go.Candlestick(x=df_15m['Datetime_NY'], open=df_15m['Open'], high=df_15m['High'], low=df_15m['Low'], close=df_15m['Close'], name="Price (15m)"))
             
-            # --- OTE FIBONACCI OVERLAY (Simplified for Current View) ---
-            # Calculate range of the displayed data (or Day) to show Fibs
             view_high = df_15m['High'].max()
             view_low = df_15m['Low'].min()
-            
-            # If Bullish Bias (Discount), Draw Fib Low -> High
-            # If Bearish Bias (Premium), Draw Fib High -> Low
-            # We will draw the 62%, 70.5%, 79% lines
-            
             diff = view_high - view_low
             
-            if in_premium: # Bearish Bias -> We want to sell a rally
-                # Retracement goes UP from Low to High? No, Impulse is Down. Retracement is Up.
-                # Simplification: Show the retracement levels relative to the current range
+            if in_premium:
                 ote_62 = view_low + (diff * 0.62)
                 ote_79 = view_low + (diff * 0.79)
                 color_ote = "red"
                 bias_text = "Bearish OTE Zone (Sell)"
-            else: # Bullish Bias
+            else:
                 ote_62 = view_high - (diff * 0.62)
                 ote_79 = view_high - (diff * 0.79)
                 color_ote = "green"
                 bias_text = "Bullish OTE Zone (Buy)"
             
-            # Add OTE Zone Rect
             fig_osok.add_hrect(y0=ote_62, y1=ote_79, fillcolor=color_ote, opacity=0.1, annotation_text=bias_text, annotation_position="right")
             
-            # Kill Zones
             base_dt_osok = pd.to_datetime(target_date_osok).tz_localize('America/New_York') if df_15m['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date_osok)
             def to_ms_osok(h, m): return base_dt_osok.replace(hour=h, minute=m).timestamp() * 1000
             
@@ -448,7 +478,6 @@ if st.sidebar.button("Scan All Assets"):
         bar.progress((i+1)/len(asset_map))
         try:
             if analysis_mode == "One Shot One Kill (OSOK)":
-                 # OSOK SCAN
                  d = get_data_weekly(tk, 25)
                  if d is not None:
                      last_20 = d.iloc[-21:-1]
