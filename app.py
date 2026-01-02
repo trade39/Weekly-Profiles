@@ -306,9 +306,14 @@ if analysis_mode == "Weekly Profiles":
                         fig_d = px.bar(df_c, x="Day", y="Count", color="Type", barmode="group", color_discrete_map={"Highs": "#EF553B", "Lows": "#00CC96"})
                         fig_d.update_layout(template="plotly_dark")
                         st.plotly_chart(fig_d, use_container_width=True)
+                    
                     with c_b:
                         st.subheader("Profile Distribution")
-                        fig_p = px.pie(stats_df['Profile'].value_counts().reset_index(), names='index', values='count', hole=0.4)
+                        # --- FIX: Safe DataFrame renaming for Pie Chart ---
+                        profile_counts = stats_df['Profile'].value_counts().reset_index()
+                        profile_counts.columns = ['Profile', 'Count'] # Explicitly name columns to avoid version errors
+                        
+                        fig_p = px.pie(profile_counts, names='Profile', values='Count', hole=0.4)
                         fig_p.update_layout(template="plotly_dark")
                         st.plotly_chart(fig_p, use_container_width=True)
 
