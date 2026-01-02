@@ -81,7 +81,6 @@ def get_data_intraday(ticker, target_date):
         data = data.reset_index()
         
         # Convert to NY Time (ICT Standard)
-        # yfinance usually returns UTC. We assume UTC if tz-naive, then convert.
         if data['Datetime'].dt.tz is None:
             data['Datetime'] = data['Datetime'].dt.tz_localize('UTC')
         
@@ -154,31 +153,22 @@ def identify_intraday_profile(df):
     if df.empty: return None
     
     # Define Time Windows
-    # Midnight Open: The opening price of the 00:00 candle
     midnight_bar = df[df['Datetime_NY'].dt.hour == 0]
     if midnight_bar.empty:
-        # Fallback to first bar if 00:00 is missing (common in crypto/futures gaps)
         midnight_open = df.iloc[0]['Open']
     else:
         midnight_open = midnight_bar.iloc[0]['Open']
         
-    # Judas Swing Window: 00:00 to 02:00
     judas_start = time(0, 0)
     judas_end = time(2, 0)
     
-    # Filter data for the whole day vs judas window
-    df['Time'] = df['Datetime_NY'].dt.time
-    
-    # Determine Day Trend (Close vs Midnight Open)
     current_price = df.iloc[-1]['Close']
     is_bullish = current_price > midnight_open
     trend = "Bullish" if is_bullish else "Bearish"
     
-    # Find High/Low of the day (so far)
     day_high = df['High'].max()
     day_low = df['Low'].min()
     
-    # Find Time of High and Low
     high_time_idx = df['High'].idxmax()
     low_time_idx = df['Low'].idxmin()
     high_time = df.loc[high_time_idx, 'Datetime_NY'].time()
@@ -188,12 +178,7 @@ def identify_intraday_profile(df):
     desc = "Price is chopping around opening price."
     
     # --- LOGIC ---
-    # Normal Protraction: Manipulation (High for Sell, Low for Buy) happens 00:00-02:00
-    # Delayed Protraction: Manipulation happens AFTER 02:00
-    
     if is_bullish:
-        # Expecting a Low to form, then rally
-        # Check when the Low formed
         if judas_start <= low_time <= judas_end:
             profile = "London Normal Protraction (Buy)"
             desc = "Classic Buy Day. Price dipped (Judas Swing) between 12-2 AM NY, formed the Low, then rallied."
@@ -201,8 +186,6 @@ def identify_intraday_profile(df):
             profile = "London Delayed Protraction (Buy)"
             desc = "Delayed Buy Day. The Low did not form until AFTER 2 AM NY."
     else:
-        # Expecting a High to form, then drop
-        # Check when the High formed
         if judas_start <= high_time <= judas_end:
             profile = "London Normal Protraction (Sell)"
             desc = "Classic Sell Day. Price rallied (Judas Swing) between 12-2 AM NY, formed the High, then dropped."
@@ -223,7 +206,7 @@ def identify_intraday_profile(df):
 
 if analysis_mode == "Weekly Profiles":
     
-    # --- EXISTING WEEKLY LOGIC ---
+    # --- WEEKLY LOGIC ---
     st.sidebar.subheader("Weekly Settings")
     lookback_weeks = st.sidebar.slider("Weeks to Display", 1, 20, 4)
     stats_lookback = st.sidebar.slider("Stats Range", 10, 104, 52)
@@ -309,9 +292,9 @@ if analysis_mode == "Weekly Profiles":
                     
                     with c_b:
                         st.subheader("Profile Distribution")
-                        # --- FIX: Safe DataFrame renaming for Pie Chart ---
+                        # Explicitly rename to avoid pandas version errors
                         profile_counts = stats_df['Profile'].value_counts().reset_index()
-                        profile_counts.columns = ['Profile', 'Count'] # Explicitly name columns to avoid version errors
+                        profile_counts.columns = ['Profile', 'Count'] 
                         
                         fig_p = px.pie(profile_counts, names='Profile', values='Count', hole=0.4)
                         fig_p.update_layout(template="plotly_dark")
@@ -319,14 +302,17 @@ if analysis_mode == "Weekly Profiles":
 
 elif analysis_mode == "Intraday Profiles":
     
-    # --- NEW INTRADAY LOGIC ---
+    # --- INTRADAY LOGIC (UPDATED WITH KILL ZONES) ---
     st.sidebar.subheader("Intraday Settings")
     
-    # Date Selection (Limit to last 59 days for 5m data)
+    # Date Selection
     today = datetime.now().date()
     min_date = today - timedelta(days=59)
-    
     target_date = st.sidebar.date_input("Select Trading Day", today, min_value=min_date, max_value=today)
+    
+    # Toggles
+    show_killzones = st.sidebar.checkbox("Show Kill Zones (London/NY)", value=True)
+    show_pdl_pdh = st.sidebar.checkbox("Show Previous Day High/Low", value=True)
     
     st.title(f"⏱️ Intraday Profile (London): {selected_asset_name}")
     st.markdown(f"Analyzing London Protraction logic for **{target_date}**.")
@@ -336,9 +322,35 @@ elif analysis_mode == "Intraday Profiles":
         
     if df_intra is not None and not df_intra.empty:
         
-        # Analyze
+        # 1. Analyze Current Day Profile
         res = identify_intraday_profile(df_intra)
         
+        # 2. Get Previous Day Data (for PDH/PDL)
+        prev_day_stats = None
+        if show_pdl_pdh:
+            # We fetch a larger window to ensure we catch the last trading day
+            daily_check = yf.download(ticker_symbol, period="5d", interval="1d", progress=False)
+            if not daily_check.empty:
+                # Handle multi-index if it exists
+                if isinstance(daily_check.columns, pd.MultiIndex):
+                     daily_check.columns = daily_check.columns.get_level_values(0)
+                
+                daily_check = daily_check.reset_index()
+                # Ensure Date is comparable
+                daily_check['Date'] = pd.to_datetime(daily_check['Date']).dt.date
+                
+                # Get data strictly BEFORE target_date
+                past_days = daily_check[daily_check['Date'] < target_date]
+                if not past_days.empty:
+                    last_day = past_days.iloc[-1]
+                    try:
+                        pdh = last_day['High'].item()
+                        pdl = last_day['Low'].item()
+                    except:
+                        pdh = last_day['High']
+                        pdl = last_day['Low']
+                    prev_day_stats = {"PDH": pdh, "PDL": pdl}
+
         # Metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Day Trend (vs Open)", res['Trend'], delta_color="normal" if res['Trend']=="Bullish" else "inverse")
@@ -362,22 +374,29 @@ elif analysis_mode == "Intraday Profiles":
         # Add Midnight Open Line
         fig.add_hline(y=res['Midnight_Open'], line_dash="dot", line_color="white", annotation_text="Midnight Open")
         
-        # --- FIX: Convert Timestamps to Milliseconds for Plotly ---
+        # --- TIME CALCULATIONS (Milliseconds for Plotly) ---
+        # Get base datetime with timezone info
         base_dt = pd.to_datetime(target_date).tz_localize('America/New_York') if df_intra['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date)
         
-        # Define 00:00 and 02:00
-        t0_ts = base_dt.replace(hour=0, minute=0)
-        t2_ts = base_dt.replace(hour=2, minute=0)
+        def to_ms(h, m):
+            dt = base_dt.replace(hour=h, minute=m)
+            return dt.timestamp() * 1000
+
+        # Midnight & 02:00 Vertical Lines
+        fig.add_vline(x=to_ms(0,0), line_dash="solid", line_color="gray", annotation_text="00:00 NY")
+        fig.add_vline(x=to_ms(2,0), line_dash="solid", line_color="gray", annotation_text="02:00 NY")
         
-        # Convert to milliseconds for safely plotting vertical lines
-        t0 = t0_ts.timestamp() * 1000
-        t2 = t2_ts.timestamp() * 1000
-        
-        fig.add_vline(x=t0, line_dash="solid", line_color="gray", annotation_text="00:00 NY")
-        fig.add_vline(x=t2, line_dash="solid", line_color="gray", annotation_text="02:00 NY")
-        
-        # Highlight Judas Swing Zone
-        fig.add_vrect(x0=t0, x1=t2, fillcolor="blue", opacity=0.1, annotation_text="Judas Swing / Protraction", annotation_position="top left")
+        # --- KILL ZONES OVERLAY ---
+        if show_killzones:
+            # London Open (02:00 - 05:00)
+            fig.add_vrect(x0=to_ms(2,0), x1=to_ms(5,0), fillcolor="green", opacity=0.07, annotation_text="London Kill Zone", annotation_position="top left")
+            # NY Open (07:00 - 10:00)
+            fig.add_vrect(x0=to_ms(7,0), x1=to_ms(10,0), fillcolor="orange", opacity=0.07, annotation_text="NY Kill Zone", annotation_position="top left")
+
+        # --- PDH / PDL OVERLAY ---
+        if prev_day_stats:
+            fig.add_hline(y=prev_day_stats['PDH'], line_dash="dash", line_color="#EF553B", annotation_text="PDH (Liquidity)")
+            fig.add_hline(y=prev_day_stats['PDL'], line_dash="dash", line_color="#00CC96", annotation_text="PDL (Liquidity)", annotation_position="bottom right")
 
         fig.update_layout(
             title=f"Intraday Chart (NY Time) - {target_date}",
@@ -391,9 +410,10 @@ elif analysis_mode == "Intraday Profiles":
         st.plotly_chart(fig, use_container_width=True)
         
         st.markdown("""
-        ### Understanding London Protraction
-        * **Normal Protraction:** The High (for Sell days) or Low (for Buy days) forms **inside** the 00:00 - 02:00 AM window (The Blue Zone). This is the "Judas Swing".
-        * **Delayed Protraction:** The High/Low forms **after** 02:00 AM. This often implies a trickier morning session where the true move starts later.
+        ### 🧠 ICT Logic
+        * **Judas Swing:** Look for a false move (Manipulation) between **00:00 and 02:00 NY**.
+        * **London Kill Zone (Green):** Ideally, the High/Low of the day forms here, often sweeping the Judas Swing liquidity.
+        * **PDH / PDL:** These are the primary "Draw on Liquidity" targets.
         """)
         
     else:
