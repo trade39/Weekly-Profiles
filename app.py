@@ -17,8 +17,11 @@ st.set_page_config(
 st.sidebar.title("Configuration")
 
 # 1. Analysis Mode
-analysis_mode = st.sidebar.radio("Analysis Mode", ["Weekly Profiles", "Intraday Profiles"], 
-                                 help="Weekly: Swing trading profiles. Intraday: London Session Protraction (Last 60 days only).")
+analysis_mode = st.sidebar.radio(
+    "Analysis Mode", 
+    ["Weekly Profiles", "Intraday Profiles", "One Shot One Kill (OSOK)"], 
+    help="Weekly: Swing profiles. Intraday: London Protraction. OSOK: 20-Week IPDA Range + OTE Setup."
+)
 
 # 2. Fallback Toggle
 use_etf = st.sidebar.checkbox("Use ETF Tickers (More Stable)", value=False, 
@@ -66,27 +69,25 @@ def get_data_weekly(ticker, weeks=52):
         st.error(f"Error: {e}")
         return None
 
-def get_data_intraday(ticker, target_date):
-    """Fetches 5m data for a specific date (Intraday Analysis)."""
-    # yfinance 5m data is limited to last 60 days.
-    # We fetch 2 days to ensure we have the full session context (Midnight NY).
-    start_date = target_date - timedelta(days=1)
-    end_date = target_date + timedelta(days=2) # Buffer to cover full day
+def get_data_intraday(ticker, target_date, interval="5m"):
+    """Fetches intraday data. Interval can be 5m (Intraday) or 15m (OSOK)."""
+    # Free yfinance 15m/5m data is limited to last 60 days.
+    start_date = target_date - timedelta(days=2) # Buffer
+    end_date = target_date + timedelta(days=2)
     
     try:
-        # Fetch 5m data
-        data = yf.download(ticker, start=start_date, end=end_date, interval="5m", progress=False)
+        data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False)
         if data.empty: return None
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         data = data.reset_index()
         
-        # Convert to NY Time (ICT Standard)
         if data['Datetime'].dt.tz is None:
             data['Datetime'] = data['Datetime'].dt.tz_localize('UTC')
         
         data['Datetime_NY'] = data['Datetime'].dt.tz_convert('America/New_York')
         
-        # Filter for the specific target date in NY time
+        # Filter for the specific target date in NY time (or surrounding for context)
+        # For OSOK, we might want the whole week so far, but let's stick to the target date view for clarity
         mask = data['Datetime_NY'].dt.date == target_date
         return data.loc[mask].copy()
     except Exception as e:
@@ -146,59 +147,32 @@ def calculate_seasonal_path(weeks_dict, lookback):
 
 # --- INTRADAY ANALYSIS FUNCTIONS ---
 def identify_intraday_profile(df):
-    """
-    Analyzes 5m data to identify London Protraction profiles.
-    Timezone must be NY.
-    """
     if df.empty: return None
-    
-    # Define Time Windows
     midnight_bar = df[df['Datetime_NY'].dt.hour == 0]
-    if midnight_bar.empty:
-        midnight_open = df.iloc[0]['Open']
-    else:
-        midnight_open = midnight_bar.iloc[0]['Open']
+    if midnight_bar.empty: midnight_open = df.iloc[0]['Open']
+    else: midnight_open = midnight_bar.iloc[0]['Open']
         
     judas_start = time(0, 0)
     judas_end = time(2, 0)
-    
     current_price = df.iloc[-1]['Close']
     is_bullish = current_price > midnight_open
     trend = "Bullish" if is_bullish else "Bearish"
     
     day_high = df['High'].max()
     day_low = df['Low'].min()
+    high_time = df.loc[df['High'].idxmax(), 'Datetime_NY'].time()
+    low_time = df.loc[df['Low'].idxmin(), 'Datetime_NY'].time()
     
-    high_time_idx = df['High'].idxmax()
-    low_time_idx = df['Low'].idxmin()
-    high_time = df.loc[high_time_idx, 'Datetime_NY'].time()
-    low_time = df.loc[low_time_idx, 'Datetime_NY'].time()
+    profile, desc = "Consolidation", "Choppy."
     
-    profile = "Consolidation / Undefined"
-    desc = "Price is chopping around opening price."
-    
-    # --- LOGIC ---
     if is_bullish:
-        if judas_start <= low_time <= judas_end:
-            profile = "London Normal Protraction (Buy)"
-            desc = "Classic Buy Day. Price dipped (Judas Swing) between 12-2 AM NY, formed the Low, then rallied."
-        elif low_time > judas_end:
-            profile = "London Delayed Protraction (Buy)"
-            desc = "Delayed Buy Day. The Low did not form until AFTER 2 AM NY."
+        if judas_start <= low_time <= judas_end: profile, desc = "London Normal (Buy)", "Judas Swing Low (0-2 AM)."
+        elif low_time > judas_end: profile, desc = "London Delayed (Buy)", "Low formed after 2 AM."
     else:
-        if judas_start <= high_time <= judas_end:
-            profile = "London Normal Protraction (Sell)"
-            desc = "Classic Sell Day. Price rallied (Judas Swing) between 12-2 AM NY, formed the High, then dropped."
-        elif high_time > judas_end:
-            profile = "London Delayed Protraction (Sell)"
-            desc = "Delayed Sell Day. The High did not form until AFTER 2 AM NY."
+        if judas_start <= high_time <= judas_end: profile, desc = "London Normal (Sell)", "Judas Swing High (0-2 AM)."
+        elif high_time > judas_end: profile, desc = "London Delayed (Sell)", "High formed after 2 AM."
 
-    return {
-        "Trend": trend, "Profile": profile, "Description": desc,
-        "Midnight_Open": midnight_open,
-        "High": day_high, "Low": day_low,
-        "High_Time": high_time, "Low_Time": low_time
-    }
+    return {"Trend": trend, "Profile": profile, "Description": desc, "Midnight_Open": midnight_open, "High": day_high, "Low": day_low, "High_Time": high_time, "Low_Time": low_time}
 
 # =========================================
 # MAIN LOGIC BRANCHING
@@ -206,7 +180,6 @@ def identify_intraday_profile(df):
 
 if analysis_mode == "Weekly Profiles":
     
-    # --- WEEKLY LOGIC ---
     st.sidebar.subheader("Weekly Settings")
     lookback_weeks = st.sidebar.slider("Weeks to Display", 1, 20, 4)
     stats_lookback = st.sidebar.slider("Stats Range", 10, 104, 52)
@@ -224,7 +197,6 @@ if analysis_mode == "Weekly Profiles":
         if not week_keys:
             st.error("No data.")
         else:
-            # Calc Stats
             stats_data = []
             for w_start in week_keys[:stats_lookback]:
                 w_df = weeks.get_group(w_start)
@@ -239,9 +211,8 @@ if analysis_mode == "Weekly Profiles":
             with tab1:
                 sel_week = st.selectbox("Select Week", week_keys[:lookback_weeks], format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}")
                 
-                # Prev Week High/Low
-                prev_data = None
                 sel_idx = week_keys.index(sel_week)
+                prev_data = None
                 if sel_idx + 1 < len(week_keys):
                     p_df = weeks.get_group(week_keys[sel_idx+1])
                     prev_data = {"PWH": p_df['High'].max(), "PWL": p_df['Low'].min()}
@@ -289,28 +260,21 @@ if analysis_mode == "Weekly Profiles":
                         fig_d = px.bar(df_c, x="Day", y="Count", color="Type", barmode="group", color_discrete_map={"Highs": "#EF553B", "Lows": "#00CC96"})
                         fig_d.update_layout(template="plotly_dark")
                         st.plotly_chart(fig_d, use_container_width=True)
-                    
                     with c_b:
                         st.subheader("Profile Distribution")
-                        # Explicitly rename to avoid pandas version errors
                         profile_counts = stats_df['Profile'].value_counts().reset_index()
                         profile_counts.columns = ['Profile', 'Count'] 
-                        
                         fig_p = px.pie(profile_counts, names='Profile', values='Count', hole=0.4)
                         fig_p.update_layout(template="plotly_dark")
                         st.plotly_chart(fig_p, use_container_width=True)
 
 elif analysis_mode == "Intraday Profiles":
     
-    # --- INTRADAY LOGIC (UPDATED WITH KILL ZONES) ---
     st.sidebar.subheader("Intraday Settings")
-    
-    # Date Selection
     today = datetime.now().date()
     min_date = today - timedelta(days=59)
     target_date = st.sidebar.date_input("Select Trading Day", today, min_value=min_date, max_value=today)
     
-    # Toggles
     show_killzones = st.sidebar.checkbox("Show Kill Zones (London/NY)", value=True)
     show_pdl_pdh = st.sidebar.checkbox("Show Previous Day High/Low", value=True)
     
@@ -321,105 +285,159 @@ elif analysis_mode == "Intraday Profiles":
         df_intra = get_data_intraday(ticker_symbol, target_date)
         
     if df_intra is not None and not df_intra.empty:
-        
-        # 1. Analyze Current Day Profile
         res = identify_intraday_profile(df_intra)
         
-        # 2. Get Previous Day Data (for PDH/PDL)
+        # PDH/PDL
         prev_day_stats = None
         if show_pdl_pdh:
-            # We fetch a larger window to ensure we catch the last trading day
             daily_check = yf.download(ticker_symbol, period="5d", interval="1d", progress=False)
             if not daily_check.empty:
-                # Handle multi-index if it exists
-                if isinstance(daily_check.columns, pd.MultiIndex):
-                     daily_check.columns = daily_check.columns.get_level_values(0)
-                
+                if isinstance(daily_check.columns, pd.MultiIndex): daily_check.columns = daily_check.columns.get_level_values(0)
                 daily_check = daily_check.reset_index()
-                # Ensure Date is comparable
                 daily_check['Date'] = pd.to_datetime(daily_check['Date']).dt.date
-                
-                # Get data strictly BEFORE target_date
                 past_days = daily_check[daily_check['Date'] < target_date]
                 if not past_days.empty:
                     last_day = past_days.iloc[-1]
-                    try:
-                        pdh = last_day['High'].item()
-                        pdl = last_day['Low'].item()
-                    except:
-                        pdh = last_day['High']
-                        pdl = last_day['Low']
+                    try: pdh, pdl = last_day['High'].item(), last_day['Low'].item()
+                    except: pdh, pdl = last_day['High'], last_day['Low']
                     prev_day_stats = {"PDH": pdh, "PDL": pdl}
 
-        # Metrics
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Day Trend (vs Open)", res['Trend'], delta_color="normal" if res['Trend']=="Bullish" else "inverse")
-        c2.metric("Profile Type", res['Profile'])
-        c3.metric("High Time (NY)", str(res['High_Time'])[:5])
-        c4.metric("Low Time (NY)", str(res['Low_Time'])[:5])
-        
+        c1.metric("Trend", res['Trend'], delta_color="normal" if res['Trend']=="Bullish" else "inverse")
+        c2.metric("Profile", res['Profile'])
+        c3.metric("High Time", str(res['High_Time'])[:5])
+        c4.metric("Low Time", str(res['Low_Time'])[:5])
         st.info(f"**Scenario:** {res['Description']}")
         
-        # Chart
         fig = go.Figure()
-        
-        # Candlestick
-        fig.add_trace(go.Candlestick(
-            x=df_intra['Datetime_NY'],
-            open=df_intra['Open'], high=df_intra['High'],
-            low=df_intra['Low'], close=df_intra['Close'],
-            name="Price (5m)"
-        ))
-        
-        # Add Midnight Open Line
+        fig.add_trace(go.Candlestick(x=df_intra['Datetime_NY'], open=df_intra['Open'], high=df_intra['High'], low=df_intra['Low'], close=df_intra['Close'], name="Price (5m)"))
         fig.add_hline(y=res['Midnight_Open'], line_dash="dot", line_color="white", annotation_text="Midnight Open")
         
-        # --- TIME CALCULATIONS (Milliseconds for Plotly) ---
-        # Get base datetime with timezone info
         base_dt = pd.to_datetime(target_date).tz_localize('America/New_York') if df_intra['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date)
-        
-        def to_ms(h, m):
-            dt = base_dt.replace(hour=h, minute=m)
-            return dt.timestamp() * 1000
+        def to_ms(h, m): return base_dt.replace(hour=h, minute=m).timestamp() * 1000
 
-        # Midnight & 02:00 Vertical Lines
         fig.add_vline(x=to_ms(0,0), line_dash="solid", line_color="gray", annotation_text="00:00 NY")
         fig.add_vline(x=to_ms(2,0), line_dash="solid", line_color="gray", annotation_text="02:00 NY")
         
-        # --- KILL ZONES OVERLAY ---
         if show_killzones:
-            # London Open (02:00 - 05:00)
-            fig.add_vrect(x0=to_ms(2,0), x1=to_ms(5,0), fillcolor="green", opacity=0.07, annotation_text="London Kill Zone", annotation_position="top left")
-            # NY Open (07:00 - 10:00)
-            fig.add_vrect(x0=to_ms(7,0), x1=to_ms(10,0), fillcolor="orange", opacity=0.07, annotation_text="NY Kill Zone", annotation_position="top left")
+            fig.add_vrect(x0=to_ms(2,0), x1=to_ms(5,0), fillcolor="green", opacity=0.07, annotation_text="London KZ", annotation_position="top left")
+            fig.add_vrect(x0=to_ms(7,0), x1=to_ms(10,0), fillcolor="orange", opacity=0.07, annotation_text="NY KZ", annotation_position="top left")
 
-        # --- PDH / PDL OVERLAY ---
         if prev_day_stats:
-            fig.add_hline(y=prev_day_stats['PDH'], line_dash="dash", line_color="#EF553B", annotation_text="PDH (Liquidity)")
-            fig.add_hline(y=prev_day_stats['PDL'], line_dash="dash", line_color="#00CC96", annotation_text="PDL (Liquidity)", annotation_position="bottom right")
+            fig.add_hline(y=prev_day_stats['PDH'], line_dash="dash", line_color="#EF553B", annotation_text="PDH")
+            fig.add_hline(y=prev_day_stats['PDL'], line_dash="dash", line_color="#00CC96", annotation_text="PDL", annotation_position="bottom right")
 
-        fig.update_layout(
-            title=f"Intraday Chart (NY Time) - {target_date}",
-            xaxis_title="Time (New York)",
-            yaxis_title="Price",
-            template="plotly_dark",
-            height=600,
-            xaxis_rangeslider_visible=False
-        )
-        
+        fig.update_layout(title=f"Intraday Chart (NY Time) - {target_date}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
         
-        st.markdown("""
-        ### 🧠 ICT Logic
-        * **Judas Swing:** Look for a false move (Manipulation) between **00:00 and 02:00 NY**.
-        * **London Kill Zone (Green):** Ideally, the High/Low of the day forms here, often sweeping the Judas Swing liquidity.
-        * **PDH / PDL:** These are the primary "Draw on Liquidity" targets.
-        """)
-        
-    else:
-        st.error("No Intraday data found. Note: Free data is limited to the last 60 days.")
+    else: st.error("No Intraday data found.")
 
-# --- MARKET SCANNER (Combined) ---
+elif analysis_mode == "One Shot One Kill (OSOK)":
+    
+    # --- OSOK LOGIC ---
+    st.sidebar.subheader("OSOK Settings")
+    st.title("🎯 One Shot One Kill (OSOK) Model")
+    st.markdown("Identifies the **20-Week Dealing Range** and potential **OTE Setups**.")
+
+    # 1. Fetch Weekly Data (Last 25 weeks to ensure 20 lookback)
+    with st.spinner("Analyzing 20-Week IPDA Range..."):
+        df_weekly = get_data_weekly(ticker_symbol, weeks=25)
+    
+    if df_weekly is not None:
+        # Sort by date
+        df_weekly = df_weekly.sort_values('Date')
+        
+        # Get last 20 weeks (excluding current if incomplete, but usually we include recent closed)
+        last_20 = df_weekly.iloc[-21:-1] # Taking last 20 completed weeks usually
+        current_week = df_weekly.iloc[-1]
+        
+        ipda_high = last_20['High'].max()
+        ipda_low = last_20['Low'].min()
+        ipda_range = ipda_high - ipda_low
+        equilibrium = (ipda_high + ipda_low) / 2
+        
+        # Current Price Position
+        current_close = current_week['Close']
+        in_premium = current_close > equilibrium
+        
+        # Metrics Display
+        m1, m2, m3 = st.columns(3)
+        m1.metric("20-Week High (Liquidity)", f"{ipda_high:.2f}")
+        m2.metric("20-Week Low (Liquidity)", f"{ipda_low:.2f}")
+        m3.metric("Current State", "PREMIUM (Sell)" if in_premium else "DISCOUNT (Buy)", 
+                  delta="-Sell" if in_premium else "+Buy", delta_color="inverse")
+        
+        st.progress((current_close - ipda_low) / ipda_range)
+        st.caption(f"Price is at {((current_close - ipda_low) / ipda_range)*100:.1f}% of the 20-week range.")
+
+        st.divider()
+        
+        # 2. Intraday Setup View (15m Chart)
+        st.subheader("Execution: 15m OTE Setup")
+        
+        today = datetime.now().date()
+        target_date_osok = st.sidebar.date_input("Select Day", today)
+        
+        df_15m = get_data_intraday(ticker_symbol, target_date_osok, interval="15m")
+        
+        if df_15m is not None and not df_15m.empty:
+            
+            # Identify Day of Week
+            day_name = pd.to_datetime(target_date_osok).strftime("%A")
+            is_anchor_day = day_name in ["Monday", "Tuesday", "Wednesday"]
+            
+            status_color = "green" if is_anchor_day else "orange"
+            st.markdown(f"**Day:** {day_name} (:{status_color}[{'Anchor Point Potential' if is_anchor_day else 'Standard Trading Day'}])")
+            
+            # --- Charting ---
+            fig_osok = go.Figure()
+            fig_osok.add_trace(go.Candlestick(x=df_15m['Datetime_NY'], open=df_15m['Open'], high=df_15m['High'], low=df_15m['Low'], close=df_15m['Close'], name="Price (15m)"))
+            
+            # --- OTE FIBONACCI OVERLAY (Simplified for Current View) ---
+            # Calculate range of the displayed data (or Day) to show Fibs
+            view_high = df_15m['High'].max()
+            view_low = df_15m['Low'].min()
+            
+            # If Bullish Bias (Discount), Draw Fib Low -> High
+            # If Bearish Bias (Premium), Draw Fib High -> Low
+            # We will draw the 62%, 70.5%, 79% lines
+            
+            diff = view_high - view_low
+            
+            if in_premium: # Bearish Bias -> We want to sell a rally
+                # Retracement goes UP from Low to High? No, Impulse is Down. Retracement is Up.
+                # Simplification: Show the retracement levels relative to the current range
+                ote_62 = view_low + (diff * 0.62)
+                ote_79 = view_low + (diff * 0.79)
+                color_ote = "red"
+                bias_text = "Bearish OTE Zone (Sell)"
+            else: # Bullish Bias
+                ote_62 = view_high - (diff * 0.62)
+                ote_79 = view_high - (diff * 0.79)
+                color_ote = "green"
+                bias_text = "Bullish OTE Zone (Buy)"
+            
+            # Add OTE Zone Rect
+            fig_osok.add_hrect(y0=ote_62, y1=ote_79, fillcolor=color_ote, opacity=0.1, annotation_text=bias_text, annotation_position="right")
+            
+            # Kill Zones
+            base_dt_osok = pd.to_datetime(target_date_osok).tz_localize('America/New_York') if df_15m['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date_osok)
+            def to_ms_osok(h, m): return base_dt_osok.replace(hour=h, minute=m).timestamp() * 1000
+            
+            fig_osok.add_vrect(x0=to_ms_osok(2,0), x1=to_ms_osok(5,0), fillcolor="green", opacity=0.07, annotation_text="London KZ", annotation_position="top left")
+            fig_osok.add_vrect(x0=to_ms_osok(7,0), x1=to_ms_osok(10,0), fillcolor="orange", opacity=0.07, annotation_text="NY KZ", annotation_position="top left")
+
+            fig_osok.update_layout(title=f"OSOK Execution (15m) - {target_date_osok}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig_osok, use_container_width=True)
+            
+            st.info(f"**OSOK Checklist:** 1. Price in { 'Premium' if in_premium else 'Discount' } of 20-week range? ✅ | 2. Is it Mon/Tue/Wed? {'✅' if is_anchor_day else '❌'} | 3. Wait for price to hit the OTE Zone during a Kill Zone.")
+            
+        else:
+            st.warning("No intraday data available for the selected date.")
+    else:
+        st.error("Could not fetch weekly data.")
+
+# --- MARKET SCANNER ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("🚀 Market Scanner")
 if st.sidebar.button("Scan All Assets"):
@@ -429,15 +447,22 @@ if st.sidebar.button("Scan All Assets"):
     for i, (name, tk) in enumerate(asset_map.items()):
         bar.progress((i+1)/len(asset_map))
         try:
-            # Scan based on current mode
-            if analysis_mode == "Weekly Profiles":
+            if analysis_mode == "One Shot One Kill (OSOK)":
+                 # OSOK SCAN
+                 d = get_data_weekly(tk, 25)
+                 if d is not None:
+                     last_20 = d.iloc[-21:-1]
+                     curr = d.iloc[-1]['Close']
+                     high, low = last_20['High'].max(), last_20['Low'].min()
+                     state = "Premium (Sell)" if curr > (high+low)/2 else "Discount (Buy)"
+                     results.append({"Asset": name, "Type": "OSOK", "State": state, "20-Wk High": high, "20-Wk Low": low})
+            elif analysis_mode == "Weekly Profiles":
                 d = get_data_weekly(tk, 4)
                 if d is not None:
                     last_wk = d.groupby('Week_Start').get_group(sorted(list(d['Week_Start'].unique()))[-1])
                     r = identify_weekly_profile(last_wk)
                     results.append({"Asset": name, "Type": "Weekly", "Profile": r['Profile'], "Trend": r['Trend']})
             else:
-                # Intraday scan (Today)
                 d = get_data_intraday(tk, datetime.now().date())
                 if d is not None:
                     r = identify_intraday_profile(d)
@@ -446,7 +471,6 @@ if st.sidebar.button("Scan All Assets"):
     bar.empty()
     if results:
         res_df = pd.DataFrame(results)
-        def color_trend(val): return f'color: {"#00CC96" if val == "Bullish" else "#EF553B"}; font-weight: bold'
-        st.dataframe(res_df.style.applymap(color_trend, subset=['Trend']), use_container_width=True)
+        st.dataframe(res_df, use_container_width=True)
     else:
         st.warning("No data found.")
