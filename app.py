@@ -3,11 +3,12 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+import pytz
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="ICT Weekly Profiles Analyzer",
+    page_title="ICT Profiles Analyzer",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -15,11 +16,15 @@ st.set_page_config(
 # --- SIDEBAR SETTINGS ---
 st.sidebar.title("Configuration")
 
-# 1. Fallback Toggle
+# 1. Analysis Mode
+analysis_mode = st.sidebar.radio("Analysis Mode", ["Weekly Profiles", "Intraday Profiles"], 
+                                 help="Weekly: Swing trading profiles. Intraday: London Session Protraction (Last 60 days only).")
+
+# 2. Fallback Toggle
 use_etf = st.sidebar.checkbox("Use ETF Tickers (More Stable)", value=False, 
     help="Check this if Futures data (ES=F, GC=F) fails to load. ETFs (SPY, GLD) are more reliable on the free API.")
 
-# 2. Asset Selection
+# 3. Asset Selection
 if use_etf:
     asset_map = {
         "Gold (GLD ETF)": "GLD",
@@ -42,353 +47,379 @@ else:
 selected_asset_name = st.sidebar.selectbox("Select Asset", list(asset_map.keys()))
 ticker_symbol = asset_map[selected_asset_name]
 
-# 3. Lookback Periods
-st.sidebar.subheader("Analysis Settings")
-lookback_weeks = st.sidebar.slider("Recent Weeks to Display", min_value=1, max_value=20, value=4)
-stats_lookback = st.sidebar.slider("Statistical Analysis Range (Weeks)", min_value=10, max_value=104, value=52, 
-                                   help="How far back to look for probability stats.")
+# --- SHARED HELPER FUNCTIONS ---
 
-# --- HELPER FUNCTIONS ---
-
-def get_data(ticker, weeks=52):
-    """
-    Fetches daily data from yfinance with error handling and debugging.
-    """
-    period_days = weeks * 7 + 21 # Buffer for PWH/PWL calculation
+def get_data_weekly(ticker, weeks=52):
+    """Fetches daily data for Weekly Analysis."""
+    period_days = weeks * 7 + 21
     end_date = datetime.now()
     start_date = end_date - timedelta(days=period_days)
-    
     try:
-        # Download data
         data = yf.download(ticker, start=start_date, end=end_date, interval="1d", progress=False)
-        
-        if data.empty:
-            st.error(f"⚠️ Yahoo Finance returned no data for **{ticker}**.")
-            st.warning("Tip: Try checking the 'Use ETF Tickers' box in the sidebar.")
-            return None
-
-        # --- FIX: Flatten MultiIndex Columns ---
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-
-        # Reset index to make Date a column
+        if data.empty: return None
+        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         data = data.reset_index()
         data['Date'] = pd.to_datetime(data['Date'])
-        
-        # Identify the start of the week (Monday) for grouping
         data['Week_Start'] = data['Date'].apply(lambda x: x - timedelta(days=x.weekday()))
-        
         return data
-
     except Exception as e:
-        st.error(f"Critical Error fetching data for {ticker}: {e}")
+        st.error(f"Error: {e}")
         return None
 
-def identify_profile(week_df):
-    """
-    Analyzes a single week's dataframe to identify the ICT Weekly Profile.
-    """
-    if week_df.empty:
-        return {"Type": "Insufficient Data", "Desc": "No data available"}
-
-    try:
-        open_price = week_df.iloc[0]['Open'].item()
-        close_price = week_df.iloc[-1]['Close'].item()
-    except AttributeError:
-        open_price = week_df.iloc[0]['Open']
-        close_price = week_df.iloc[-1]['Close']
-
-    high_price = week_df['High'].max()
-    low_price = week_df['Low'].min()
+def get_data_intraday(ticker, target_date):
+    """Fetches 5m data for a specific date (Intraday Analysis)."""
+    # yfinance 5m data is limited to last 60 days.
+    # We fetch 2 days to ensure we have the full session context (Midnight NY).
+    start_date = target_date - timedelta(days=1)
+    end_date = target_date + timedelta(days=2) # Buffer to cover full day
     
-    is_bullish = close_price > open_price
+    try:
+        # Fetch 5m data
+        data = yf.download(ticker, start=start_date, end=end_date, interval="5m", progress=False)
+        if data.empty: return None
+        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+        data = data.reset_index()
+        
+        # Convert to NY Time (ICT Standard)
+        # yfinance usually returns UTC. We assume UTC if tz-naive, then convert.
+        if data['Datetime'].dt.tz is None:
+            data['Datetime'] = data['Datetime'].dt.tz_localize('UTC')
+        
+        data['Datetime_NY'] = data['Datetime'].dt.tz_convert('America/New_York')
+        
+        # Filter for the specific target date in NY time
+        mask = data['Datetime_NY'].dt.date == target_date
+        return data.loc[mask].copy()
+    except Exception as e:
+        st.error(f"Error fetching intraday data: {e}")
+        return None
+
+# --- WEEKLY ANALYSIS FUNCTIONS ---
+def identify_weekly_profile(week_df):
+    if week_df.empty: return {"Type": "Insufficient Data"}
+    try:
+        open_p = week_df.iloc[0]['Open'].item()
+        close_p = week_df.iloc[-1]['Close'].item()
+    except AttributeError:
+        open_p = week_df.iloc[0]['Open']
+        close_p = week_df.iloc[-1]['Close']
+        
+    is_bullish = close_p > open_p
     trend = "Bullish" if is_bullish else "Bearish"
     
     high_date = week_df.loc[week_df['High'].idxmax(), 'Date']
     low_date = week_df.loc[week_df['Low'].idxmin(), 'Date']
-    
     if hasattr(high_date, 'item'): high_date = high_date.item()
     if hasattr(low_date, 'item'): low_date = low_date.item()
     
-    high_day_num = high_date.weekday()
-    low_day_num = low_date.weekday()
+    high_day = high_date.weekday()
+    low_day = low_date.weekday()
     
-    profile_name = "Undefined"
-    description = "Pattern does not fit strict classic definitions."
-
+    profile, desc = "Undefined", "N/A"
+    
     if is_bullish:
-        if low_day_num == 1: profile_name, description = "Classic Tuesday Low", "Low formed on Tuesday, followed by expansion higher."
-        elif low_day_num == 0: profile_name, description = "Monday Low", "Low formed on Monday. Often leads to a steady expansion."
-        elif low_day_num == 2: profile_name, description = "Wednesday Low / Reversal", "Market manipulated Mon-Tue, Low formed Wednesday."
-        elif low_day_num == 3: profile_name, description = "Consolidation Thursday Reversal", "Consolidation Mon-Wed, Stop hunt Low on Thursday, then Reversal."
-        elif low_day_num == 4: profile_name, description = "Seek & Destroy / Friday Low", "Choppy week, Low formed late on Friday."
-    else: 
-        if high_day_num == 1: profile_name, description = "Classic Tuesday High", "High formed on Tuesday, followed by expansion lower."
-        elif high_day_num == 0: profile_name, description = "Monday High", "High formed on Monday. Often leads to a steady decline."
-        elif high_day_num == 2: profile_name, description = "Wednesday High / Reversal", "Market manipulated Mon-Tue, High formed Wednesday."
-        elif high_day_num == 3: profile_name, description = "Consolidation Thursday Reversal", "Consolidation Mon-Wed, Stop hunt High on Thursday, then Reversal."
-        elif high_day_num == 4: profile_name, description = "Seek & Destroy / Friday High", "Choppy week, High formed late on Friday."
-
-    return {
-        "Trend": trend,
-        "Profile": profile_name,
-        "Description": description,
-        "Weekly_High": high_price,
-        "Weekly_Low": low_price,
-        "High_Day": high_date.strftime("%A"),
-        "Low_Day": low_date.strftime("%A"),
-        "High_Day_Num": high_day_num,
-        "Low_Day_Num": low_day_num
-    }
+        if low_day == 1: profile, desc = "Classic Tuesday Low", "Low on Tue, expansion higher."
+        elif low_day == 0: profile, desc = "Monday Low", "Low on Mon, steady expansion."
+        elif low_day == 2: profile, desc = "Wednesday Low / Reversal", "Manipulation Mon-Tue, Low on Wed."
+        elif low_day == 3: profile, desc = "Consolidation Thu Reversal", "Stop hunt Low on Thu, then Reversal."
+        elif low_day == 4: profile, desc = "Seek & Destroy / Fri Low", "Choppy, Low late Friday."
+    else:
+        if high_day == 1: profile, desc = "Classic Tuesday High", "High on Tue, expansion lower."
+        elif high_day == 0: profile, desc = "Monday High", "High on Mon, steady decline."
+        elif high_day == 2: profile, desc = "Wednesday High / Reversal", "Manipulation Mon-Tue, High on Wed."
+        elif high_day == 3: profile, desc = "Consolidation Thu Reversal", "Stop hunt High on Thu, then Reversal."
+        elif high_day == 4: profile, desc = "Seek & Destroy / Fri High", "Choppy, High late Friday."
+        
+    return {"Trend": trend, "Profile": profile, "Description": desc, "Weekly_High": week_df['High'].max(), "Weekly_Low": week_df['Low'].min(), "High_Day": high_date.strftime("%A"), "Low_Day": low_date.strftime("%A"), "High_Day_Num": high_day, "Low_Day_Num": low_day}
 
 def calculate_seasonal_path(weeks_dict, lookback):
-    """
-    Calculates the average percentage move for each day of the week
-    relative to the Monday Open.
-    """
     seasonal_data = []
-    
-    # Iterate through recent weeks
-    week_keys = list(weeks_dict.groups.keys())
-    week_keys.sort(reverse=True)
-    
+    week_keys = sorted(list(weeks_dict.groups.keys()), reverse=True)
     for w_start in week_keys[:lookback]:
         w_df = weeks_dict.get_group(w_start).copy()
-        if len(w_df) < 2: continue # Skip partial weeks
-        
-        # Get Monday Open Price
+        if len(w_df) < 2: continue
         mon_open = w_df.iloc[0]['Open']
         if hasattr(mon_open, 'item'): mon_open = mon_open.item()
-        
-        # Calculate % deviation for each day available
         for _, row in w_df.iterrows():
-            day_num = row['Date'].weekday()
-            close_price = row['Close']
-            pct_change = ((close_price - mon_open) / mon_open) * 100
-            
-            seasonal_data.append({
-                "DayNum": day_num,
-                "PctChange": pct_change,
-                "DayName": row['Date'].strftime("%A")
-            })
-            
-    if not seasonal_data:
-        return None
-        
-    df_seas = pd.DataFrame(seasonal_data)
-    # Group by Day Number and get Mean
-    avg_path = df_seas.groupby('DayNum').agg({'PctChange': 'mean', 'DayName': 'first'}).reset_index()
-    return avg_path
+            seasonal_data.append({"DayNum": row['Date'].weekday(), "PctChange": ((row['Close'] - mon_open) / mon_open) * 100, "DayName": row['Date'].strftime("%A")})
+    if not seasonal_data: return None
+    return pd.DataFrame(seasonal_data).groupby('DayNum').agg({'PctChange': 'mean', 'DayName': 'first'}).reset_index()
 
-# --- MAIN APP LOGIC ---
-
-st.title(f"📊 ICT Weekly Profile Identifier: {selected_asset_name}")
-st.markdown(f"Analysis based on **{ticker_symbol}** price action.")
-
-# 1. Load Data
-with st.spinner(f'Fetching data for {ticker_symbol}...'):
-    fetch_weeks = max(lookback_weeks, stats_lookback) + 3 # Extra buffer for Prev Week
-    df = get_data(ticker_symbol, weeks=fetch_weeks)
-
-if df is not None:
-    weeks = df.groupby('Week_Start')
-    week_keys = list(weeks.groups.keys())
-    week_keys.sort(reverse=True)
-    week_keys = [k for k in week_keys if not pd.isna(k)]
+# --- INTRADAY ANALYSIS FUNCTIONS ---
+def identify_intraday_profile(df):
+    """
+    Analyzes 5m data to identify London Protraction profiles.
+    Timezone must be NY.
+    """
+    if df.empty: return None
     
-    if not week_keys:
-        st.error("No valid weekly data found.")
+    # Define Time Windows
+    # Midnight Open: The opening price of the 00:00 candle
+    midnight_bar = df[df['Datetime_NY'].dt.hour == 0]
+    if midnight_bar.empty:
+        # Fallback to first bar if 00:00 is missing (common in crypto/futures gaps)
+        midnight_open = df.iloc[0]['Open']
     else:
-        # --- PROCESS STATS ---
-        stats_data = []
-        for w_start in week_keys[:stats_lookback]:
-            w_df = weeks.get_group(w_start)
-            if len(w_df) >= 3:
-                res = identify_profile(w_df)
-                res['Week Start'] = w_start
-                stats_data.append(res)
-        stats_df = pd.DataFrame(stats_data)
+        midnight_open = midnight_bar.iloc[0]['Open']
+        
+    # Judas Swing Window: 00:00 to 02:00
+    judas_start = time(0, 0)
+    judas_end = time(2, 0)
+    
+    # Filter data for the whole day vs judas window
+    df['Time'] = df['Datetime_NY'].dt.time
+    
+    # Determine Day Trend (Close vs Midnight Open)
+    current_price = df.iloc[-1]['Close']
+    is_bullish = current_price > midnight_open
+    trend = "Bullish" if is_bullish else "Bearish"
+    
+    # Find High/Low of the day (so far)
+    day_high = df['High'].max()
+    day_low = df['Low'].min()
+    
+    # Find Time of High and Low
+    high_time_idx = df['High'].idxmax()
+    low_time_idx = df['Low'].idxmin()
+    high_time = df.loc[high_time_idx, 'Datetime_NY'].time()
+    low_time = df.loc[low_time_idx, 'Datetime_NY'].time()
+    
+    profile = "Consolidation / Undefined"
+    desc = "Price is chopping around opening price."
+    
+    # --- LOGIC ---
+    # Normal Protraction: Manipulation (High for Sell, Low for Buy) happens 00:00-02:00
+    # Delayed Protraction: Manipulation happens AFTER 02:00
+    
+    if is_bullish:
+        # Expecting a Low to form, then rally
+        # Check when the Low formed
+        if judas_start <= low_time <= judas_end:
+            profile = "London Normal Protraction (Buy)"
+            desc = "Classic Buy Day. Price dipped (Judas Swing) between 12-2 AM NY, formed the Low, then rallied."
+        elif low_time > judas_end:
+            profile = "London Delayed Protraction (Buy)"
+            desc = "Delayed Buy Day. The Low did not form until AFTER 2 AM NY."
+    else:
+        # Expecting a High to form, then drop
+        # Check when the High formed
+        if judas_start <= high_time <= judas_end:
+            profile = "London Normal Protraction (Sell)"
+            desc = "Classic Sell Day. Price rallied (Judas Swing) between 12-2 AM NY, formed the High, then dropped."
+        elif high_time > judas_end:
+            profile = "London Delayed Protraction (Sell)"
+            desc = "Delayed Sell Day. The High did not form until AFTER 2 AM NY."
 
-        # --- TABS LAYOUT ---
-        tab1, tab2 = st.tabs(["🔎 Current Analysis", "📈 Statistical Probability"])
+    return {
+        "Trend": trend, "Profile": profile, "Description": desc,
+        "Midnight_Open": midnight_open,
+        "High": day_high, "Low": day_low,
+        "High_Time": high_time, "Low_Time": low_time
+    }
 
-        # ==========================
-        # TAB 1: CURRENT ANALYSIS
-        # ==========================
-        with tab1:
-            # Dropdown for week selection
-            selected_week_start = st.selectbox(
-                "Select Week to View Chart", 
-                week_keys[:lookback_weeks],
-                format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}"
-            )
+# =========================================
+# MAIN LOGIC BRANCHING
+# =========================================
+
+if analysis_mode == "Weekly Profiles":
+    
+    # --- EXISTING WEEKLY LOGIC ---
+    st.sidebar.subheader("Weekly Settings")
+    lookback_weeks = st.sidebar.slider("Weeks to Display", 1, 20, 4)
+    stats_lookback = st.sidebar.slider("Stats Range", 10, 104, 52)
+    
+    st.title(f"📊 Weekly Profile Identifier: {selected_asset_name}")
+    
+    with st.spinner(f"Fetching weekly data for {ticker_symbol}..."):
+        df = get_data_weekly(ticker_symbol, max(lookback_weeks, stats_lookback) + 3)
+
+    if df is not None:
+        weeks = df.groupby('Week_Start')
+        week_keys = sorted(list(weeks.groups.keys()), reverse=True)
+        week_keys = [k for k in week_keys if not pd.isna(k)]
+        
+        if not week_keys:
+            st.error("No data.")
+        else:
+            # Calc Stats
+            stats_data = []
+            for w_start in week_keys[:stats_lookback]:
+                w_df = weeks.get_group(w_start)
+                if len(w_df) >= 3:
+                    res = identify_weekly_profile(w_df)
+                    res['Week Start'] = w_start
+                    stats_data.append(res)
+            stats_df = pd.DataFrame(stats_data)
+
+            tab1, tab2 = st.tabs(["🔎 Current Analysis", "📈 Statistical Probability"])
             
-            # Identify Previous Week for PWH/PWL
-            # Find index of selected week
-            sel_idx = week_keys.index(selected_week_start)
-            prev_week_data = None
-            
-            # If there is a week before this one in our data
-            if sel_idx + 1 < len(week_keys):
-                prev_week_start = week_keys[sel_idx + 1]
-                prev_week_df = weeks.get_group(prev_week_start)
-                prev_week_data = {
-                    "PWH": prev_week_df['High'].max(),
-                    "PWL": prev_week_df['Low'].min()
-                }
-
-            current_week_df = weeks.get_group(selected_week_start).copy()
-            analysis = identify_profile(current_week_df)
-            
-            # Metrics
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Weekly Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
-            c2.metric("Detected Profile", analysis["Profile"])
-            c3.metric("High Formed On", analysis["High_Day"])
-            c4.metric("Low Formed On", analysis["Low_Day"])
-            
-            st.info(f"**Logic:** {analysis['Description']}")
-
-            # Chart
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=current_week_df['Date'], open=current_week_df['Open'],
-                high=current_week_df['High'], low=current_week_df['Low'],
-                close=current_week_df['Close'], name='Price'
-            ))
-
-            # --- LIQUIDITY LEVELS (PWH / PWL) ---
-            if prev_week_data:
-                # Add PWH Line
-                fig.add_hline(y=prev_week_data['PWH'], line_dash="dash", line_color="orange", annotation_text="PWH", annotation_position="top right")
-                # Add PWL Line
-                fig.add_hline(y=prev_week_data['PWL'], line_dash="dash", line_color="orange", annotation_text="PWL", annotation_position="bottom right")
-
-            # Annotations (Current High/Low)
-            max_idx = current_week_df['High'].idxmax()
-            min_idx = current_week_df['Low'].idxmin()
-            
-            fig.add_annotation(x=current_week_df.loc[max_idx, 'Date'], y=current_week_df.loc[max_idx, 'High'],
-                               text="High", showarrow=True, arrowhead=1, ay=-40)
-            fig.add_annotation(x=current_week_df.loc[min_idx, 'Date'], y=current_week_df.loc[min_idx, 'Low'],
-                               text="Low", showarrow=True, arrowhead=1, ay=40)
-
-            fig.update_layout(
-                title=f"{selected_asset_name} - Week of {selected_week_start.strftime('%Y-%m-%d')}",
-                xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=False,
-                height=600, template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20)
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Recent History Table
-            st.subheader("Recent History")
-            display_cols = ['Week Start', 'Trend', 'Profile', 'High_Day', 'Low_Day']
-            if not stats_df.empty:
-                 st.dataframe(stats_df[display_cols].head(lookback_weeks), use_container_width=True)
-
-        # ==========================
-        # TAB 2: STATISTICAL PROBABILITY
-        # ==========================
-        with tab2:
-            st.markdown(f"### Statistical Analysis (Last {len(stats_df)} Weeks)")
-            
-            if not stats_df.empty:
+            with tab1:
+                sel_week = st.selectbox("Select Week", week_keys[:lookback_weeks], format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}")
                 
-                # --- NEW: SEASONAL PATH CHART ---
-                st.subheader("Average Weekly Path (Composite)")
-                st.caption(f"Average price movement (Mon-Fri) over the last {stats_lookback} weeks. This reveals the asset's 'Personality'.")
+                # Prev Week High/Low
+                prev_data = None
+                sel_idx = week_keys.index(sel_week)
+                if sel_idx + 1 < len(week_keys):
+                    p_df = weeks.get_group(week_keys[sel_idx+1])
+                    prev_data = {"PWH": p_df['High'].max(), "PWL": p_df['Low'].min()}
                 
-                avg_path = calculate_seasonal_path(weeks, stats_lookback)
+                curr_df = weeks.get_group(sel_week).copy()
+                analysis = identify_weekly_profile(curr_df)
                 
-                if avg_path is not None:
-                    fig_seas = px.line(avg_path, x="DayName", y="PctChange", markers=True, 
-                                       title=f"Composite Weekly Path (% Change from Monday Open)",
-                                       labels={"PctChange": "Average % Move", "DayName": "Day of Week"})
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
+                c2.metric("Profile", analysis["Profile"])
+                c3.metric("High Day", analysis["High_Day"])
+                c4.metric("Low Day", analysis["Low_Day"])
+                st.info(f"**Logic:** {analysis['Description']}")
+                
+                fig = go.Figure(data=[go.Candlestick(x=curr_df['Date'], open=curr_df['Open'], high=curr_df['High'], low=curr_df['Low'], close=curr_df['Close'])])
+                if prev_data:
+                    fig.add_hline(y=prev_data['PWH'], line_dash="dash", line_color="orange", annotation_text="PWH")
+                    fig.add_hline(y=prev_data['PWL'], line_dash="dash", line_color="orange", annotation_text="PWL", annotation_position="bottom right")
+                
+                fig.update_layout(title=f"Weekly Chart: {selected_asset_name}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                if not stats_df.empty:
+                    st.subheader("History")
+                    st.dataframe(stats_df[['Week Start', 'Trend', 'Profile', 'High_Day', 'Low_Day']].head(lookback_weeks), use_container_width=True)
+
+            with tab2:
+                if not stats_df.empty:
+                    st.subheader("Average Weekly Path")
+                    avg_path = calculate_seasonal_path(weeks, stats_lookback)
+                    if avg_path is not None:
+                        fig_seas = px.line(avg_path, x="DayName", y="PctChange", markers=True, title="Composite Weekly Path (% vs Mon Open)")
+                        fig_seas.add_hline(y=0, line_dash="dot", line_color="white")
+                        fig_seas.update_layout(template="plotly_dark")
+                        st.plotly_chart(fig_seas, use_container_width=True)
                     
-                    # Add zero line
-                    fig_seas.add_hline(y=0, line_dash="dot", line_color="white")
-                    
-                    fig_seas.update_layout(template="plotly_dark")
-                    st.plotly_chart(fig_seas, use_container_width=True)
-                else:
-                    st.warning("Not enough data to calculate seasonal path.")
+                    st.markdown("---")
+                    c_a, c_b = st.columns(2)
+                    with c_a:
+                        st.subheader("Day Probability")
+                        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+                        h_c = stats_df['High_Day'].value_counts().reindex(days, fill_value=0)
+                        l_c = stats_df['Low_Day'].value_counts().reindex(days, fill_value=0)
+                        df_c = pd.DataFrame({"Day": days, "Highs": h_c.values, "Lows": l_c.values}).melt(id_vars="Day", var_name="Type", value_name="Count")
+                        fig_d = px.bar(df_c, x="Day", y="Count", color="Type", barmode="group", color_discrete_map={"Highs": "#EF553B", "Lows": "#00CC96"})
+                        fig_d.update_layout(template="plotly_dark")
+                        st.plotly_chart(fig_d, use_container_width=True)
+                    with c_b:
+                        st.subheader("Profile Distribution")
+                        fig_p = px.pie(stats_df['Profile'].value_counts().reset_index(), names='index', values='count', hole=0.4)
+                        fig_p.update_layout(template="plotly_dark")
+                        st.plotly_chart(fig_p, use_container_width=True)
 
-                st.markdown("---")
-                
-                # 1. Day of Week Probability
-                st.subheader("Day of Week Probability")
-                days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-                high_counts = stats_df['High_Day'].value_counts().reindex(days_order, fill_value=0)
-                low_counts = stats_df['Low_Day'].value_counts().reindex(days_order, fill_value=0)
-                
-                counts_df = pd.DataFrame({"Day": days_order, "High Formation": high_counts.values, "Low Formation": low_counts.values})
-                melted_counts = counts_df.melt(id_vars="Day", var_name="Type", value_name="Count")
-                
-                fig_days = px.bar(melted_counts, x="Day", y="Count", color="Type", barmode="group",
-                    color_discrete_map={"High Formation": "#EF553B", "Low Formation": "#00CC96"})
-                fig_days.update_layout(template="plotly_dark")
-                st.plotly_chart(fig_days, use_container_width=True)
-                
-                # 2. Profile & Trend
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.subheader("Profile Distribution")
-                    profile_counts = stats_df['Profile'].value_counts().reset_index()
-                    profile_counts.columns = ['Profile', 'Count']
-                    fig_prof = px.pie(profile_counts, names='Profile', values='Count', hole=0.4)
-                    fig_prof.update_layout(template="plotly_dark")
-                    st.plotly_chart(fig_prof, use_container_width=True)
-                
-                with col_b:
-                    st.subheader("Trend Bias")
-                    trend_counts = stats_df['Trend'].value_counts().reset_index()
-                    trend_counts.columns = ['Trend', 'Count']
-                    fig_trend = px.bar(trend_counts, x='Trend', y='Count', color='Trend',
-                                       color_discrete_map={"Bullish": "#00CC96", "Bearish": "#EF553B"})
-                    fig_trend.update_layout(template="plotly_dark")
-                    st.plotly_chart(fig_trend, use_container_width=True)
+elif analysis_mode == "Intraday Profiles":
+    
+    # --- NEW INTRADAY LOGIC ---
+    st.sidebar.subheader("Intraday Settings")
+    
+    # Date Selection (Limit to last 59 days for 5m data)
+    today = datetime.now().date()
+    min_date = today - timedelta(days=59)
+    
+    target_date = st.sidebar.date_input("Select Trading Day", today, min_value=min_date, max_value=today)
+    
+    st.title(f"⏱️ Intraday Profile (London): {selected_asset_name}")
+    st.markdown(f"Analyzing London Protraction logic for **{target_date}**.")
+    
+    with st.spinner("Fetching 5-minute data..."):
+        df_intra = get_data_intraday(ticker_symbol, target_date)
+        
+    if df_intra is not None and not df_intra.empty:
+        
+        # Analyze
+        res = identify_intraday_profile(df_intra)
+        
+        # Metrics
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Day Trend (vs Open)", res['Trend'], delta_color="normal" if res['Trend']=="Bullish" else "inverse")
+        c2.metric("Profile Type", res['Profile'])
+        c3.metric("High Time (NY)", str(res['High_Time'])[:5])
+        c4.metric("Low Time (NY)", str(res['Low_Time'])[:5])
+        
+        st.info(f"**Scenario:** {res['Description']}")
+        
+        # Chart
+        fig = go.Figure()
+        
+        # Candlestick
+        fig.add_trace(go.Candlestick(
+            x=df_intra['Datetime_NY'],
+            open=df_intra['Open'], high=df_intra['High'],
+            low=df_intra['Low'], close=df_intra['Close'],
+            name="Price (5m)"
+        ))
+        
+        # Add Midnight Open Line
+        fig.add_hline(y=res['Midnight_Open'], line_dash="dot", line_color="white", annotation_text="Midnight Open")
+        
+        # Add Vertical Lines for Time Zones
+        # We need to construct the full datetime for the vertical lines on the selected date
+        base_dt = pd.to_datetime(target_date).tz_localize('America/New_York') if df_intra['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date)
+        
+        # 00:00 NY
+        t0 = base_dt.replace(hour=0, minute=0)
+        # 02:00 NY
+        t2 = base_dt.replace(hour=2, minute=0)
+        
+        fig.add_vline(x=t0, line_dash="solid", line_color="gray", annotation_text="00:00 NY")
+        fig.add_vline(x=t2, line_dash="solid", line_color="gray", annotation_text="02:00 NY")
+        
+        # Highlight Judas Swing Zone
+        fig.add_vrect(x0=t0, x1=t2, fillcolor="blue", opacity=0.1, annotation_text="Judas Swing / Protraction", annotation_position="top left")
 
-            else:
-                st.warning("Not enough data to generate statistics.")
+        fig.update_layout(
+            title=f"Intraday Chart (NY Time) - {target_date}",
+            xaxis_title="Time (New York)",
+            yaxis_title="Price",
+            template="plotly_dark",
+            height=600,
+            xaxis_rangeslider_visible=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("""
+        ### Understanding London Protraction
+        * **Normal Protraction:** The High (for Sell days) or Low (for Buy days) forms **inside** the 00:00 - 02:00 AM window (The Blue Zone). This is the "Judas Swing".
+        * **Delayed Protraction:** The High/Low forms **after** 02:00 AM. This often implies a trickier morning session where the true move starts later.
+        """)
+        
+    else:
+        st.error("No Intraday data found. Note: Free data is limited to the last 60 days.")
 
-else:
-    st.info("Please select an asset. If data fails to load, check the 'Use ETF Tickers' box.")
-
-# --- SIDEBAR: MARKET SCREENER ---
+# --- MARKET SCANNER (Combined) ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("🚀 Market Scanner")
-
 if st.sidebar.button("Scan All Assets"):
-    st.markdown("### 🔍 Market Wide Analysis (Current Week)")
-    scanner_results = []
-    progress_bar = st.progress(0)
-    total_assets = len(asset_map)
-    
-    for i, (name, ticker) in enumerate(asset_map.items()):
-        progress_bar.progress((i + 1) / total_assets)
+    st.markdown("### 🔍 Market Wide Scan")
+    results = []
+    bar = st.progress(0)
+    for i, (name, tk) in enumerate(asset_map.items()):
+        bar.progress((i+1)/len(asset_map))
         try:
-            d = get_data(ticker, weeks=4) 
-            if d is not None:
-                w_groups = d.groupby('Week_Start')
-                keys = list(w_groups.groups.keys())
-                keys.sort(reverse=True)
-                if keys:
-                    curr_df = w_groups.get_group(keys[0])
-                    res = identify_profile(curr_df)
-                    scanner_results.append({
-                        "Asset": name,
-                        "Trend": res['Trend'],
-                        "Profile": res['Profile'],
-                        "High Day": res['High_Day'],
-                        "Low Day": res['Low_Day']
-                    })
-        except Exception: pass
-
-    progress_bar.empty()
-    if scanner_results:
-        scan_df = pd.DataFrame(scanner_results)
-        def highlight_trend(val):
-            return f'color: {"#00CC96" if val == "Bullish" else "#EF553B"}; font-weight: bold'
-        st.dataframe(scan_df.style.applymap(highlight_trend, subset=['Trend']), use_container_width=True)
+            # Scan based on current mode
+            if analysis_mode == "Weekly Profiles":
+                d = get_data_weekly(tk, 4)
+                if d is not None:
+                    last_wk = d.groupby('Week_Start').get_group(sorted(list(d['Week_Start'].unique()))[-1])
+                    r = identify_weekly_profile(last_wk)
+                    results.append({"Asset": name, "Type": "Weekly", "Profile": r['Profile'], "Trend": r['Trend']})
+            else:
+                # Intraday scan (Today)
+                d = get_data_intraday(tk, datetime.now().date())
+                if d is not None:
+                    r = identify_intraday_profile(d)
+                    results.append({"Asset": name, "Type": "Intraday", "Profile": r['Profile'], "Trend": r['Trend']})
+        except: pass
+    bar.empty()
+    if results:
+        res_df = pd.DataFrame(results)
+        def color_trend(val): return f'color: {"#00CC96" if val == "Bullish" else "#EF553B"}; font-weight: bold'
+        st.dataframe(res_df.style.applymap(color_trend, subset=['Trend']), use_container_width=True)
     else:
-        st.warning("No data found during scan.")
+        st.warning("No data found.")
