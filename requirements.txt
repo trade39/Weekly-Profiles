@@ -3,3 +3,4 @@ yfinance
 pandas
 plotly
 cot_reports
+scikit-learn
