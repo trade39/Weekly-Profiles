@@ -9,6 +9,7 @@ import pytz
 import requests
 from bs4 import BeautifulSoup
 import re
+import cot_reports as cot  # NEW IMPORT
 
 # ML Imports
 from sklearn.ensemble import RandomForestClassifier
@@ -87,6 +88,12 @@ st.markdown("""
         color: white;
         border-color: #333333;
     }
+
+    .stNumberInput div[data-baseweb="input"] {
+        background-color: #1E252F;
+        color: white;
+        border-color: #333333;
+    }
     
     /* Global Text Adjustments */
     h1, h2, h3, h4, h5, h6 {
@@ -141,38 +148,87 @@ st.sidebar.title("⚙️ Configuration")
 # 1. Analysis Mode
 analysis_mode = st.sidebar.radio(
     "Analysis Mode", 
-    ["Weekly Protocols (News & Logic)", "Weekly Profiles", "Intraday Profiles", "One Shot One Kill (OSOK)"], 
+    [
+        "Weekly Protocols (News & Logic)", 
+        "Weekly Profiles", 
+        "Intraday Profiles", 
+        "One Shot One Kill (OSOK)",
+        "COT Quant Terminal"  # NEW MODE
+    ], 
     help="Select the analytical framework."
 )
 
 st.sidebar.markdown("---")
 
-# 2. Fallback Toggle
-use_etf = st.sidebar.checkbox("Use ETF Tickers (More Stable)", value=False, 
-    help="Check this if Futures data (ES=F, GC=F) fails to load.")
-
-# 3. Asset Selection
-if use_etf:
-    asset_map = {
-        "Gold (GLD ETF)": "GLD",
-        "S&P 500 (SPY ETF)": "SPY",
-        "Nasdaq 100 (QQQ ETF)": "QQQ",
-        "EUR/USD": "EURUSD=X",
-        "GBP/USD": "GBPUSD=X",
-        "Bitcoin": "BTC-USD"
+# 2. Asset Selection Logic (Conditional based on Mode)
+if analysis_mode == "COT Quant Terminal":
+    # COT CONFIGURATION
+    COT_ASSET_CONFIG = {
+        "Gold (GC)": {
+            "keywords": ["GOLD", "COMMODITY EXCHANGE"],
+            "report_type": "disaggregated_fut",
+            "labels": ("Managed Money", "Producer/Merchant/Processor/User") 
+        },
+        "S&P 500 (ES)": {
+            "keywords": ["E-MINI S&P 500", "CHICAGO MERCANTILE EXCHANGE"],
+            "report_type": "traders_in_financial_futures_fut",
+            "labels": ("Leveraged Funds", "Dealer/Intermediary") 
+        },
+        "Nasdaq 100 (NQ)": {
+            "keywords": ["E-MINI NASDAQ-100", "CHICAGO MERCANTILE EXCHANGE"],
+            "report_type": "traders_in_financial_futures_fut",
+            "labels": ("Leveraged Funds", "Dealer/Intermediary")
+        },
+        "Japanese Yen (6J)": {
+            "keywords": ["JAPANESE YEN", "CHICAGO MERCANTILE EXCHANGE"],
+            "report_type": "traders_in_financial_futures_fut",
+            "labels": ("Leveraged Funds", "Asset Manager/Institutional")
+        },
+        "EUR/USD (6E)": {
+            "keywords": ["EURO FX", "CHICAGO MERCANTILE EXCHANGE"],
+            "report_type": "traders_in_financial_futures_fut",
+            "labels": ("Leveraged Funds", "Asset Manager/Institutional")
+        },
+        "Bitcoin (BTC)": {
+            "keywords": ["BITCOIN", "CHICAGO MERCANTILE EXCHANGE"],
+            "report_type": "traders_in_financial_futures_fut",
+            "labels": ("Leveraged Funds", "Asset Manager/Institutional")
+        }
     }
+    
+    selected_cot_asset = st.sidebar.selectbox("Select Asset (COT)", list(COT_ASSET_CONFIG.keys()))
+    current_year = datetime.now().year
+    cot_start_year = st.sidebar.number_input("Lookback Start Year", min_value=2015, max_value=current_year, value=2020)
+    
 else:
-    asset_map = {
-        "Gold (Futures)": "GC=F",
-        "S&P 500 (E-mini Futures)": "ES=F",
-        "Nasdaq 100 (E-mini Futures)": "NQ=F",
-        "EUR/USD": "EURUSD=X",
-        "GBP/USD": "GBPUSD=X",
-        "Bitcoin": "BTC-USD"
-    }
+    # STANDARD CONFIGURATION
+    # 2. Fallback Toggle
+    use_etf = st.sidebar.checkbox("Use ETF Tickers (More Stable)", value=False, 
+        help="Check this if Futures data (ES=F, GC=F) fails to load.")
 
-selected_asset_name = st.sidebar.selectbox("Select Asset", list(asset_map.keys()))
-ticker_symbol = asset_map[selected_asset_name]
+    # 3. Asset Selection
+    if use_etf:
+        asset_map = {
+            "Gold (GLD ETF)": "GLD",
+            "S&P 500 (SPY ETF)": "SPY",
+            "Nasdaq 100 (QQQ ETF)": "QQQ",
+            "EUR/USD": "EURUSD=X",
+            "GBP/USD": "GBPUSD=X",
+            "Bitcoin": "BTC-USD"
+        }
+    else:
+        asset_map = {
+            "Gold (Futures)": "GC=F",
+            "S&P 500 (E-mini Futures)": "ES=F",
+            "Nasdaq 100 (E-mini Futures)": "NQ=F",
+            "EUR/USD": "EURUSD=X",
+            "GBP/USD": "GBPUSD=X",
+            "Bitcoin": "BTC-USD"
+        }
+
+    selected_asset_name = st.sidebar.selectbox("Select Asset", list(asset_map.keys()))
+    ticker_symbol = asset_map[selected_asset_name]
+
 
 # --- SCRAPING & NEWS FUNCTIONS ---
 
@@ -180,7 +236,6 @@ ticker_symbol = asset_map[selected_asset_name]
 def scrape_forex_factory(week="this"):
     """
     Scrapes Forex Factory Calendar for High Impact (Red) News.
-    UPDATE 1: Added Headers and better error handling.
     """
     url = f"https://www.forexfactory.com/calendar?week={week}"
     headers = {
@@ -247,7 +302,6 @@ def get_financial_news():
         news = ticker.news
         stories = []
         for n in news[:5]:
-            # Use .get with a default empty string to avoid NoneType errors
             stories.append({
                 "Title": n.get('title', "No Title"),
                 "Publisher": n.get('publisher', "Unknown"),
@@ -287,7 +341,7 @@ def determine_weekly_protocol(ff_df, stories, manual_override_date=None):
         if has_early and not has_mid: clustering = "Early Week (Mon-Tue)"
         elif has_mid and not has_early: clustering = "Midweek (Tue-Thu)"
         elif has_late and not has_mid: clustering = "Late Week (Thu-Fri)"
-        elif has_mid: clustering = "Midweek (Tue-Thu)" # Default to Midweek if mixed
+        elif has_mid: clustering = "Midweek (Tue-Thu)" 
     
     # 3. Detect Exogenous Events (Keywords in Headlines)
     keywords = ["War", "Sanctions", "Invasion", "Emergency", "Crisis", "Attack", "OPEC", "Rate Hike"]
@@ -296,7 +350,6 @@ def determine_weekly_protocol(ff_df, stories, manual_override_date=None):
     
     if stories:
         for s in stories:
-            # Safety check: ensure title exists and is a string
             title = s.get('Title', "")
             if not isinstance(title, str): continue
             
@@ -357,7 +410,7 @@ def determine_weekly_protocol(ff_df, stories, manual_override_date=None):
             
     return protocol, clustering, red_folder_days, exogenous_found
 
-# --- SHARED HELPER FUNCTIONS ---
+# --- SHARED HELPER FUNCTIONS (YFINANCE) ---
 
 def get_data_weekly(ticker, weeks=52):
     """Fetches daily data for Weekly Analysis."""
@@ -383,7 +436,6 @@ def get_data_weekly(ticker, weeks=52):
 def get_data_intraday(ticker, target_date, interval="5m"):
     """
     Fetches intraday data. Interval can be 5m (Intraday) or 15m (OSOK).
-    UPDATE 4: Standardized Timezone Handling (UTC to NY).
     """
     start_date = target_date - timedelta(days=2) 
     end_date = target_date + timedelta(days=2)
@@ -398,10 +450,8 @@ def get_data_intraday(ticker, target_date, interval="5m"):
         
         # Robust Timezone Logic
         if data['Datetime'].dt.tz is None:
-            # Assume UTC if naive
             data['Datetime'] = data['Datetime'].dt.tz_localize('UTC')
         else:
-            # Convert to UTC to ensure baseline
             data['Datetime'] = data['Datetime'].dt.tz_convert('UTC')
         
         # Convert to NY for ICT Analysis
@@ -414,6 +464,122 @@ def get_data_intraday(ticker, target_date, interval="5m"):
         st.error(f"Error fetching intraday data: {e}")
         return None
 
+# --- SHARED HELPER FUNCTIONS (COT DATA) ---
+
+def clean_headers(df):
+    if isinstance(df.columns[0], int):
+        for i in range(20):
+            row_str = " ".join(df.iloc[i].astype(str).tolist()).lower()
+            if "market" in row_str and ("long" in row_str or "positions" in row_str):
+                df.columns = df.iloc[i]
+                return df.iloc[i+1:].reset_index(drop=True)
+    return df
+
+def map_columns(df, report_type):
+    col_map = {}
+    
+    def get_col(keywords, exclude=None):
+        for col in df.columns:
+            c_str = str(col).lower()
+            if all(k in c_str for k in keywords):
+                if exclude and any(x in c_str for x in exclude): continue
+                return col
+        return None
+
+    col_map['date'] = get_col(['report', 'date']) or get_col(['as', 'of', 'date']) or get_col(['date'])
+    col_map['market'] = get_col(['market'])
+
+    # Logic to capture "Commercial" equivalent based on report type
+    if "disaggregated" in report_type:
+        col_map['spec_long'] = get_col(['money', 'long'], exclude=['lev'])
+        col_map['spec_short'] = get_col(['money', 'short'], exclude=['lev'])
+        # "Commercials" are Producers/Merchants
+        col_map['hedge_long'] = get_col(['prod', 'merc', 'long'])
+        col_map['hedge_short'] = get_col(['prod', 'merc', 'short'])
+        
+    elif "financial" in report_type:
+        col_map['spec_long'] = get_col(['lev', 'money', 'long'])
+        col_map['spec_short'] = get_col(['lev', 'money', 'short'])
+        # "Commercials" approximation in Financials (Dealers/Asset Managers)
+        col_map['hedge_long'] = get_col(['dealer', 'long']) or get_col(['asset', 'long'])
+        col_map['hedge_short'] = get_col(['dealer', 'short']) or get_col(['asset', 'short'])
+
+    final_map = {v: k for k, v in col_map.items() if v}
+    df = df.rename(columns=final_map)
+    
+    for c in ['spec_long', 'spec_short', 'hedge_long', 'hedge_short']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            
+    return df
+
+@st.cache_data(ttl=3600)
+def load_cot_data(year, report_type):
+    try:
+        df = cot.cot_year(year=year, cot_report_type=report_type)
+        if df is None or df.empty: return None, "Empty File"
+        
+        df = clean_headers(df)
+        df = map_columns(df, report_type)
+        
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
+            df = df[df['date'] > '2000-01-01']
+            df = df.sort_values('date')
+            
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+def calculate_hedging_ranges(df):
+    """
+    ICT Logic: 
+    1. Identify 6-Month (26 week) and 12-Month (52 week) High/Low of Net Hedger Position.
+    2. Determine if we are in a Buy Program (>0) or Sell Program (<0).
+    3. Identify 'Nodules': Turning points within the range.
+    """
+    df['Net Hedger'] = df['hedge_long'] - df['hedge_short']
+    df['Net Speculator'] = df['spec_long'] - df['spec_short']
+
+    # 6 Month Range (approx 26 weeks)
+    df['6M_High'] = df['Net Hedger'].rolling(window=26).max()
+    df['6M_Low'] = df['Net Hedger'].rolling(window=26).min()
+    
+    # 12 Month Range (approx 52 weeks)
+    df['12M_High'] = df['Net Hedger'].rolling(window=52).max()
+    df['12M_Low'] = df['Net Hedger'].rolling(window=52).min()
+    
+    # Range Oscillator (0 to 100%)
+    df['Hedge_Index_6M'] = ((df['Net Hedger'] - df['6M_Low']) / (df['6M_High'] - df['6M_Low'])) * 100
+    
+    return df
+
+def generate_ict_signal(row):
+    """
+    Synthesizes the 'Zero Line' (Macro) with the 'Range Index' (Micro).
+    """
+    net_pos = row['Net Hedger']
+    hedge_idx = row['Hedge_Index_6M']
+    
+    # 1. Macro Program (Zero Line)
+    macro_program = "BUY PROGRAM (Above Zero)" if net_pos > 0 else "SELL PROGRAM (Below Zero)"
+    macro_color = "green" if net_pos > 0 else "red"
+    
+    # 2. Hedging Activity (Range Location)
+    # ICT: Look for buying at the low of the range, selling at the high.
+    if hedge_idx <= 15:
+        hedging_action = "📈 Aggressive Accumulation (Bullish Nodule)"
+        context = "Commercials are buying heavily relative to recent history."
+    elif hedge_idx >= 85:
+        hedging_action = "📉 Aggressive Distribution (Bearish Nodule)"
+        context = "Commercials are selling heavily relative to recent history."
+    else:
+        hedging_action = "Passive / Neutral"
+        context = "Commercials are maintaining positions within the range."
+        
+    return macro_program, macro_color, hedging_action, context
+
 # --- ML HELPER FUNCTIONS ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -423,63 +589,40 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def prepare_osok_ml_data(df):
-    """
-    UPDATE 2: Enhanced Feature Engineering (Trend, Seasonality, Volatility).
-    """
-    # Group by week to get weekly OHLC
     logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
     w_df = df.groupby('Week_Start').agg(logic).sort_index()
     
-    # --- FEATURES ---
-    
-    # 1. Price Structure (PD Arrays)
     w_df['20W_High'] = w_df['High'].rolling(window=20).max()
     w_df['20W_Low'] = w_df['Low'].rolling(window=20).min()
     w_df['Equilibrium'] = (w_df['20W_High'] + w_df['20W_Low']) / 2
     w_df['PD_Factor'] = (w_df['Close'] - w_df['20W_Low']) / (w_df['20W_High'] - w_df['20W_Low'])
     w_df['Dist_Eq'] = (w_df['Close'] - w_df['Equilibrium']) / w_df['Equilibrium']
-    
-    # 2. Momentum
     w_df['RSI'] = calculate_rsi(w_df['Close'], 14)
     w_df['Prev_Ret'] = w_df['Close'].pct_change()
     
-    # 3. Trend Filters (NEW)
+    # Trend Filters
     w_df['SMA_20'] = w_df['Close'].rolling(window=20).mean()
     w_df['SMA_50'] = w_df['Close'].rolling(window=50).mean()
     w_df['Trend_Bullish'] = (w_df['SMA_20'] > w_df['SMA_50']).astype(int)
-    
-    # 4. Seasonality (NEW)
     w_df['Month'] = w_df.index.month
-    
-    # 5. Volatility (NEW - ATR)
-    w_df['TR'] = np.maximum(w_df['High'] - w_df['Low'], 
-                            np.abs(w_df['High'] - w_df['Close'].shift(1)))
+    w_df['TR'] = np.maximum(w_df['High'] - w_df['Low'], np.abs(w_df['High'] - w_df['Close'].shift(1)))
     w_df['ATR'] = w_df['TR'].rolling(window=14).mean()
     w_df['Volatility'] = w_df['ATR'] / w_df['Close']
     
-    # TARGET: Will NEXT week close higher than it opens? (Bullish Candle)
+    # Target
     w_df['Target'] = (w_df['Close'].shift(-1) > w_df['Open'].shift(-1)).astype(int)
     
-    w_df = w_df.dropna()
-    return w_df
+    return w_df.dropna()
 
 def train_osok_model(ml_df):
-    """
-    UPDATE 2: Updated Feature Columns for training.
-    """
     feature_cols = ['PD_Factor', 'Dist_Eq', 'RSI', 'Prev_Ret', 'Trend_Bullish', 'Month', 'Volatility']
     X = ml_df[feature_cols]
     y = ml_df['Target']
-    
-    # Split Data (Shuffle=False for time series)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-    
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
     model.fit(X_train, y_train)
-    
     preds = model.predict(X_test)
     acc = accuracy_score(y_test, preds)
-    
     return model, acc, feature_cols
 
 # --- WEEKLY ANALYSIS FUNCTIONS ---
@@ -538,17 +681,11 @@ def predict_next_week(stats_df, current_profile):
     df_sorted = stats_df.sort_values('Week Start', ascending=True).copy()
     df_sorted['Next_Profile'] = df_sorted['Profile'].shift(-1)
     transitions = df_sorted[df_sorted['Profile'] == current_profile]
-    
-    if transitions.empty or transitions['Next_Profile'].dropna().empty:
-        return None
-    
+    if transitions.empty or transitions['Next_Profile'].dropna().empty: return None
     counts = transitions['Next_Profile'].value_counts(normalize=True)
     return dict(sorted(counts.to_dict().items(), key=lambda item: item[1], reverse=True))
 
 def identify_intraday_profile(df):
-    """
-    UPDATE 3: Added Displacement Threshold logic to reduce false positive Judas Swings.
-    """
     if df.empty: return None
     midnight_bar = df[df['Datetime_NY'].dt.hour == 0]
     if midnight_bar.empty: midnight_open = df.iloc[0]['Open']
@@ -565,7 +702,6 @@ def identify_intraday_profile(df):
     high_time = df.loc[df['High'].idxmax(), 'Datetime_NY'].time()
     low_time = df.loc[df['Low'].idxmin(), 'Datetime_NY'].time()
     
-    # Displacement Threshold (10% of total range)
     day_range = day_high - day_low
     threshold = day_range * 0.10
     
@@ -573,7 +709,6 @@ def identify_intraday_profile(df):
     
     if is_bullish:
         if judas_start <= low_time <= judas_end: 
-            # Check displacement: price must be significantly above the low
             if (current_price - day_low) > threshold:
                 profile, desc = "London Normal (Buy)", "Judas Swing Low (0-2 AM) with Displacement."
             else:
@@ -581,7 +716,6 @@ def identify_intraday_profile(df):
         elif low_time > judas_end: profile, desc = "London Delayed (Buy)", "Low formed after 2 AM."
     else:
         if judas_start <= high_time <= judas_end: 
-            # Check displacement: price must be significantly below the high
             if (day_high - current_price) > threshold:
                 profile, desc = "London Normal (Sell)", "Judas Swing High (0-2 AM) with Displacement."
             else:
@@ -602,37 +736,28 @@ if analysis_mode == "Weekly Protocols (News & Logic)":
     st.title("📅 Weekly Profile Protocols")
     st.markdown("Automated **Decision Tree** based on Economic Calendar & News Sentiment.")
     
-    # 1. Data Fetching
     with st.spinner("Scraping Forex Factory & News Feeds..."):
         if sim_mode:
-            # MOCK DATA FOR JAN 3-9 2026 (As per prompt context)
             stories = [
                 {"Title": "Oil prices steady amidst quiet trading", "Publisher": "Reuters", "Time": "2026-01-03 10:00"},
                 {"Title": "Post-holiday liquidity remains thin", "Publisher": "Bloomberg", "Time": "2026-01-03 09:30"}
             ]
-            # Empty calendar as per prompt description
             ff_df = pd.DataFrame(columns=["Date", "Time", "Currency", "Event", "Impact"]) 
-            # Force logic to think it is Monday Jan 5th 2026
             current_date_ref = datetime(2026, 1, 5).date() 
         else:
-            # REAL LIVE DATA
             ff_df = scrape_forex_factory(week="this")
             stories = get_financial_news()
             current_date_ref = datetime.now().date()
             
-    # 2. Logic Execution
     protocol, clustering, days_with_news, exo_found = determine_weekly_protocol(ff_df, stories, manual_override_date=current_date_ref)
     
-    # 3. UI Display - Top Level Status
     col_stat1, col_stat2, col_stat3 = st.columns(3)
-    
     col_stat1.metric("Current Day", current_date_ref.strftime("%A, %b %d"))
     col_stat2.metric("News Clustering", clustering, delta="High Impact" if clustering != "Minimal/None" else "Low Vol", delta_color="off")
     col_stat3.metric("Exogenous Shock?", "YES" if exo_found else "NO", delta="Override Active" if exo_found else "Normal", delta_color="inverse" if exo_found else "off")
     
     st.divider()
     
-    # 4. Action Card
     action_color = THEME['bearish'] if "Avoid" in protocol['Action'] else THEME['bullish']
     st.markdown(f"""
     <div style="background-color: #1E252F; border-left: 5px solid {action_color}; padding: 20px; border-radius: 5px;">
@@ -645,19 +770,14 @@ if analysis_mode == "Weekly Protocols (News & Logic)":
     """, unsafe_allow_html=True)
     
     st.markdown("### 🧩 Decision Tree Logic")
-    st.info("Visual Reference: Decision Tree Flow (Cluster -> Profile -> Deviation)")
-    
     col_d1, col_d2 = st.columns([1, 1])
-    
     with col_d1:
         st.subheader("📰 Economic Calendar (High Impact)")
         if ff_df is not None and not ff_df.empty:
-            # Formatting for display
             display_df = ff_df[['Date', 'Time', 'Currency', 'Event']].copy()
             st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No High Impact (Red Folder) USD events scheduled for this period (or fetch failed).")
-            
+            st.info("No High Impact (Red Folder) USD events scheduled.")
     with col_d2:
         st.subheader("📢 Hottest Stories (Sentiment)")
         if stories:
@@ -671,13 +791,11 @@ elif analysis_mode == "Weekly Profiles":
     
     st.sidebar.subheader("Weekly Settings")
     lookback_weeks = st.sidebar.slider("Weeks to Display", 1, 20, 4)
-    # Default high for better prediction accuracy
     stats_lookback = st.sidebar.slider("Stats Range (Prediction History)", 52, 300, 150)
     
     st.title(f"📊 Weekly Profile Identifier: {selected_asset_name}")
     
     with st.spinner(f"Fetching weekly data for {ticker_symbol}..."):
-        # Fetching extra data handled by get_data_weekly optimization
         df = get_data_weekly(ticker_symbol, max(lookback_weeks, stats_lookback) + 3)
 
     if df is not None:
@@ -689,7 +807,6 @@ elif analysis_mode == "Weekly Profiles":
             st.error("No data.")
         else:
             stats_data = []
-            # Calculate stats over the full requested range
             for w_start in week_keys[:stats_lookback]:
                 w_df = weeks.get_group(w_start)
                 if len(w_df) >= 3:
@@ -714,9 +831,7 @@ elif analysis_mode == "Weekly Profiles":
                 curr_df = weeks.get_group(sel_week).copy()
                 analysis = identify_weekly_profile(curr_df)
                 
-                # --- PREDICTION SECTION ---
                 st.markdown("### 🔮 Predictive Analysis")
-                
                 container = st.container()
                 with container:
                     if not stats_df.empty:
@@ -734,26 +849,17 @@ elif analysis_mode == "Weekly Profiles":
                                 st.warning("Not enough historical data to predict next week.")
                 
                 st.divider()
-                # --------------------------
-                
-                # METRICS ROW
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
                 c2.metric("Profile", analysis["Profile"])
                 c3.metric("High Day", analysis["High_Day"])
                 c4.metric("Low Day", analysis["Low_Day"])
-                
                 st.caption(f"**Logic:** {analysis['Description']}")
                 
-                # Plotly Chart with Monochromatic Scheme
                 fig = go.Figure(data=[go.Candlestick(
-                    x=curr_df['Date'], 
-                    open=curr_df['Open'], 
-                    high=curr_df['High'], 
-                    low=curr_df['Low'], 
-                    close=curr_df['Close'],
-                    increasing_line_color=THEME['bullish'], # Cyan
-                    decreasing_line_color=THEME['bearish']  # Mid-Tone Blue
+                    x=curr_df['Date'], open=curr_df['Open'], high=curr_df['High'], 
+                    low=curr_df['Low'], close=curr_df['Close'],
+                    increasing_line_color=THEME['bullish'], decreasing_line_color=THEME['bearish']
                 )])
                 
                 if prev_data:
@@ -787,7 +893,6 @@ elif analysis_mode == "Weekly Profiles":
                         h_c = stats_df['High_Day'].value_counts().reindex(days, fill_value=0)
                         l_c = stats_df['Low_Day'].value_counts().reindex(days, fill_value=0)
                         df_c = pd.DataFrame({"Day": days, "Highs": h_c.values, "Lows": l_c.values}).melt(id_vars="Day", var_name="Type", value_name="Count")
-                        # Highs = Cyan, Lows = Mid-Blue
                         fig_d = px.bar(df_c, x="Day", y="Count", color="Type", barmode="group", color_discrete_map={"Highs": THEME['bullish'], "Lows": THEME['bearish']})
                         fig_d = apply_theme(fig_d)
                         st.plotly_chart(fig_d, use_container_width=True)
@@ -818,7 +923,6 @@ elif analysis_mode == "Intraday Profiles":
     if df_intra is not None and not df_intra.empty:
         res = identify_intraday_profile(df_intra)
         
-        # PDH/PDL
         prev_day_stats = None
         if show_pdl_pdh:
             daily_check = yf.download(ticker_symbol, period="5d", interval="1d", progress=False)
@@ -838,19 +942,13 @@ elif analysis_mode == "Intraday Profiles":
         c2.metric("Profile", res['Profile'])
         c3.metric("High Time", str(res['High_Time'])[:5])
         c4.metric("Low Time", str(res['Low_Time'])[:5])
-        
         st.info(f"**Scenario:** {res['Description']}")
         
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
-            x=df_intra['Datetime_NY'], 
-            open=df_intra['Open'], 
-            high=df_intra['High'], 
-            low=df_intra['Low'], 
-            close=df_intra['Close'], 
-            name="Price (5m)",
-            increasing_line_color=THEME['bullish'],
-            decreasing_line_color=THEME['bearish']
+            x=df_intra['Datetime_NY'], open=df_intra['Open'], high=df_intra['High'], 
+            low=df_intra['Low'], close=df_intra['Close'], name="Price (5m)",
+            increasing_line_color=THEME['bullish'], decreasing_line_color=THEME['bearish']
         ))
         fig.add_hline(y=res['Midnight_Open'], line_dash="dot", line_color="white", annotation_text="Midnight Open")
         
@@ -861,7 +959,6 @@ elif analysis_mode == "Intraday Profiles":
         fig.add_vline(x=to_ms(2,0), line_dash="solid", line_color=THEME['grid'], annotation_text="02:00 NY")
         
         if show_killzones:
-            # Using requested accent fills: Translucent lighter blue (#66CCFF)
             fig.add_vrect(x0=to_ms(2,0), x1=to_ms(5,0), fillcolor=THEME['bullish'], opacity=0.1, annotation_text="London KZ", annotation_position="top left")
             fig.add_vrect(x0=to_ms(7,0), x1=to_ms(10,0), fillcolor=THEME['bearish'], opacity=0.1, annotation_text="NY KZ", annotation_position="top left")
 
@@ -878,19 +975,15 @@ elif analysis_mode == "Intraday Profiles":
 elif analysis_mode == "One Shot One Kill (OSOK)":
     
     st.sidebar.subheader("OSOK Settings")
-    
-    # UPDATE 5: OTE Anchor Selection
     ote_anchor = st.sidebar.radio("OTE Fib Anchor", ["Current Day Range", "Previous Week Range"], help="Determines the High/Low used for the OTE Fib calculation.")
     
     st.title("🎯 One Shot One Kill (OSOK) + ML Model")
     st.markdown("Identifies the **20-Week Dealing Range** and uses **Machine Learning** to predict the bias.")
 
     with st.spinner("Analyzing 20-Week IPDA Range..."):
-        # Fetch lots of data for ML training
         df_full = get_data_weekly(ticker_symbol, weeks=300)
     
     if df_full is not None:
-        # Separate data for OSOK Visuals
         df_weekly = df_full.sort_values('Date')
         last_20 = df_weekly.iloc[-21:-1]
         current_week = df_weekly.iloc[-1]
@@ -903,7 +996,6 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         current_close = current_week['Close']
         in_premium = current_close > equilibrium
         
-        # Display Metrics in Cards
         m1, m2, m3 = st.columns(3)
         m1.metric("20-Week High (Liquidity)", f"{ipda_high:.2f}")
         m2.metric("20-Week Low (Liquidity)", f"{ipda_low:.2f}")
@@ -914,7 +1006,6 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         st.progress((current_close - ipda_low) / ipda_range)
         st.caption(f"Price is at {((current_close - ipda_low) / ipda_range)*100:.1f}% of the 20-week range.")
 
-        # --- ML MODEL INTEGRATION ---
         st.divider()
         st.subheader("🤖 OSOK ML Probability Engine")
         
@@ -927,51 +1018,35 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             4. **Target:** Trains a Random Forest to predict if the *Next Week* closes higher than it opens.
             """)
         
-        # Prepare Data
         ml_df = prepare_osok_ml_data(df_full)
         
         if len(ml_df) > 50:
-            # Train Model
             model, acc, feats = train_osok_model(ml_df)
-            
-            # Predict for Current/Next Week
-            # We take the latest known row to predict the future
             latest_features = ml_df.iloc[[-1]][feats]
-            pred_prob = model.predict_proba(latest_features)[0] # [Prob Bearish, Prob Bullish]
+            pred_prob = model.predict_proba(latest_features)[0] 
             
             ml_c1, ml_c2 = st.columns(2)
-            
             with ml_c1:
                 st.metric("Model Backtest Accuracy", f"{acc*100:.1f}%")
-                bias_score = pred_prob[1] # Probability of Bullish
-                
-                if bias_score > 0.55:
-                    st.success(f"**ML Bias: BULLISH ({bias_score*100:.1f}%)**")
-                elif bias_score < 0.45:
-                    st.error(f"**ML Bias: BEARISH ({(1-bias_score)*100:.1f}%)**")
-                else:
-                    st.warning(f"**ML Bias: NEUTRAL / CHOPPY**")
-                    
+                bias_score = pred_prob[1]
+                if bias_score > 0.55: st.success(f"**ML Bias: BULLISH ({bias_score*100:.1f}%)**")
+                elif bias_score < 0.45: st.error(f"**ML Bias: BEARISH ({(1-bias_score)*100:.1f}%)**")
+                else: st.warning(f"**ML Bias: NEUTRAL / CHOPPY**")
             with ml_c2:
-                # Feature Importance
                 importances = pd.DataFrame({'Feature': feats, 'Importance': model.feature_importances_})
                 fig_imp = px.bar(importances, x='Importance', y='Feature', orientation='h', title="Factor Importance")
                 fig_imp.update_traces(marker_color=THEME['line_primary'])
                 fig_imp = apply_theme(fig_imp)
                 fig_imp.update_layout(height=200, margin=dict(l=0, r=0, t=30, b=0))
                 st.plotly_chart(fig_imp, use_container_width=True)
-                
         else:
             st.warning("Not enough historical data to train the OSOK ML model reliably.")
 
         st.divider()
-        # --- END ML INTEGRATION ---
-
         st.subheader("Execution: 15m OTE Setup")
         
         today = datetime.now().date()
         target_date_osok = st.sidebar.date_input("Select Day", today)
-        
         df_15m = get_data_intraday(ticker_symbol, target_date_osok, interval="15m")
         
         if df_15m is not None and not df_15m.empty:
@@ -983,17 +1058,11 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             
             fig_osok = go.Figure()
             fig_osok.add_trace(go.Candlestick(
-                x=df_15m['Datetime_NY'], 
-                open=df_15m['Open'], 
-                high=df_15m['High'], 
-                low=df_15m['Low'], 
-                close=df_15m['Close'], 
-                name="Price (15m)",
-                increasing_line_color=THEME['bullish'],
-                decreasing_line_color=THEME['bearish']
+                x=df_15m['Datetime_NY'], open=df_15m['Open'], high=df_15m['High'], 
+                low=df_15m['Low'], close=df_15m['Close'], name="Price (15m)",
+                increasing_line_color=THEME['bullish'], decreasing_line_color=THEME['bearish']
             ))
             
-            # Determine View Range based on User Toggle
             if ote_anchor == "Previous Week Range":
                 view_high = ipda_high
                 view_low = ipda_low
@@ -1014,7 +1083,6 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
                 color_ote = THEME['bullish']
                 bias_text = "Bullish OTE Zone (Buy)"
             
-            # Ensure OTE zone is visible within current chart limits if using external anchor
             fig_osok.add_hrect(y0=ote_62, y1=ote_79, fillcolor=color_ote, opacity=0.1, annotation_text=bias_text, annotation_position="right")
             
             base_dt_osok = pd.to_datetime(target_date_osok).tz_localize('America/New_York') if df_15m['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date_osok)
@@ -1028,11 +1096,134 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             st.plotly_chart(fig_osok, use_container_width=True)
             
             st.info(f"**OSOK Checklist:** 1. Price in { 'Premium' if in_premium else 'Discount' } of 20-week range? ✅ | 2. Is it Mon/Tue/Wed? {'✅' if is_anchor_day else '❌'} | 3. Wait for price to hit the OTE Zone during a Kill Zone.")
-            
         else:
             st.warning("No intraday data available for the selected date.")
     else:
         st.error("Could not fetch weekly data.")
+
+elif analysis_mode == "COT Quant Terminal":
+    
+    st.title("⚡ COT Quant Terminal")
+    st.markdown("Automated **Commercial Hedging Program** detection using CFTC Data.")
+    
+    # Configuration is set in sidebar, accessing it here
+    config = COT_ASSET_CONFIG[selected_cot_asset]
+    spec_label, hedge_label = config['labels']
+
+    @st.cache_data(ttl=3600)
+    def fetch_multi_year(start_y, end_y, r_type):
+        master_df = pd.DataFrame()
+        for y in range(start_y, end_y + 1):
+            df, err = load_cot_data(y, r_type)
+            if df is not None:
+                master_df = pd.concat([master_df, df])
+        return master_df
+
+    with st.spinner(f"Loading COT data for {selected_cot_asset}..."):
+        df_raw = fetch_multi_year(cot_start_year, current_year, config['report_type'])
+
+    # Filter Asset
+    if not df_raw.empty:
+        keywords = config['keywords']
+        mask = df_raw['market'].astype(str).apply(lambda x: all(k.lower() in x.lower() for k in keywords))
+        df_asset = df_raw[mask].copy().sort_values('date')
+
+        if df_asset.empty:
+            st.warning(f"No data found for {selected_cot_asset}. Check keywords.")
+        else:
+            # Calculations
+            if all(c in df_asset.columns for c in ['spec_long', 'spec_short', 'hedge_long', 'hedge_short']):
+                df_asset = calculate_hedging_ranges(df_asset)
+                
+                latest = df_asset.iloc[-1]
+                prev = df_asset.iloc[-2]
+                
+                macro_prog, macro_col, hedge_act, hedge_ctx = generate_ict_signal(latest)
+                
+                # --- DASHBOARD ---
+                st.markdown(f"### 🧬 ICT Hedging Program Analysis ({hedge_label})")
+                
+                # Top Level Status
+                status_col1, status_col2 = st.columns([1, 2])
+                
+                with status_col1:
+                    st.markdown(f"**Macro Bias (Zero Line)**")
+                    st.markdown(f":{macro_col}[**{macro_prog}**]")
+                    st.caption(f"Net Position: {int(latest['Net Hedger']):,}")
+                    
+                with status_col2:
+                    st.markdown(f"**Hedging Activity (6-Month Range)**")
+                    st.markdown(f"**{hedge_act}**")
+                    st.caption(hedge_ctx)
+                    
+                st.divider()
+
+                # Metrics
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Commercial Net", f"{int(latest['Net Hedger']):,}", f"{int(latest['Net Hedger'] - prev['Net Hedger']):,}")
+                m2.metric("6-Month Range High", f"{int(latest['6M_High']):,}", help="Highest Net Position in last 26 weeks")
+                m3.metric("6-Month Range Low", f"{int(latest['6M_Low']):,}", help="Lowest Net Position in last 26 weeks")
+                m4.metric("Range Position", f"{latest['Hedge_Index_6M']:.1f}%", help="0% = At Lows (Buying), 100% = At Highs (Selling)")
+
+                # --- VISUALIZATIONS ---
+                tab1, tab2, tab3 = st.tabs(["📊 Commercial Hedging Program", "🦋 Net Structure", "⚡ Speculator Sentiment"])
+                
+                with tab1:
+                    st.markdown("**Instructions:** Focus on the Red Line (Commercials). The Shaded Area represents the 12-Month Range.")
+                    
+                    fig1 = go.Figure()
+                    
+                    # 1. The Range (Background) - Represents the "12 Month Range" concept
+                    fig1.add_trace(go.Scatter(
+                        x=df_asset['date'], y=df_asset['12M_High'],
+                        mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'
+                    ))
+                    fig1.add_trace(go.Scatter(
+                        x=df_asset['date'], y=df_asset['12M_Low'],
+                        mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 0, 0, 0.1)',
+                        name='12M Range', hoverinfo='skip'
+                    ))
+                    
+                    # 2. The Commercial Line (The "Red Line") 
+                    fig1.add_trace(go.Scatter(
+                        x=df_asset['date'], y=df_asset['Net Hedger'],
+                        name=f'Commercials ({hedge_label})',
+                        line=dict(color='#FF0000', width=3)
+                    ))
+                    
+                    # 3. The Zero Line
+                    fig1.add_hline(y=0, line_dash="solid", line_color="white", annotation_text="Zero Line Basis", annotation_position="bottom right")
+                    
+                    fig1.update_layout(title="Commercial Hedging Program (Net Trader Position)", height=600, hovermode="x unified")
+                    fig1 = apply_theme(fig1)
+                    st.plotly_chart(fig1, use_container_width=True)
+                    
+                with tab2:
+                    # Butterfly Chart to show total Open Interest structure
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Bar(x=df_asset['date'], y=df_asset['hedge_long'], name=f"{hedge_label} Longs", marker_color='rgba(255, 0, 0, 0.6)'))
+                    fig2.add_trace(go.Bar(x=df_asset['date'], y=-df_asset['hedge_short'], name=f"{hedge_label} Shorts", marker_color='rgba(255, 0, 0, 0.3)'))
+                    fig2.add_trace(go.Scatter(x=df_asset['date'], y=df_asset['Net Hedger'], name="Net Position", line=dict(color='white', width=2, dash='dot')))
+                    
+                    fig2.update_layout(title="Commercial Structure (Longs vs Shorts)", barmode='overlay', height=500, hovermode="x unified")
+                    fig2 = apply_theme(fig2)
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                with tab3:
+                    # Speculator view for "Dumb Money" contrast 
+                    fig3 = go.Figure()
+                    fig3.add_trace(go.Scatter(x=df_asset['date'], y=df_asset['Net Speculator'], name='Large Speculators', line=dict(color='green', width=2)))
+                    fig3.add_hline(y=0, line_dash="dot", line_color="gray")
+                    fig3.update_layout(title="Large Speculator Net Position", height=500)
+                    fig3 = apply_theme(fig3)
+                    st.plotly_chart(fig3, use_container_width=True)
+
+                with st.expander("View Raw Data"):
+                    st.dataframe(df_asset.sort_values('date', ascending=False))
+            else:
+                st.error("Required columns missing for visualization.")
+    else:
+        st.error("Could not fetch COT data.")
 
 # --- MARKET SCANNER ---
 st.sidebar.markdown("---")
@@ -1058,6 +1249,9 @@ if st.sidebar.button("Scan All Assets"):
                     last_wk = d.groupby('Week_Start').get_group(sorted(list(d['Week_Start'].unique()))[-1])
                     r = identify_weekly_profile(last_wk)
                     results.append({"Asset": name, "Type": "Weekly", "Profile": r['Profile'], "Trend": r['Trend']})
+            elif analysis_mode == "COT Quant Terminal":
+                # Skip scan for COT to avoid API rate limits/time expense during quick scan
+                pass 
             else:
                 d = get_data_intraday(tk, datetime.now().date())
                 if d is not None:
@@ -1068,5 +1262,7 @@ if st.sidebar.button("Scan All Assets"):
     if results:
         res_df = pd.DataFrame(results)
         st.dataframe(res_df, use_container_width=True)
+    elif analysis_mode == "COT Quant Terminal":
+        st.info("Scanner not available for COT mode to preserve performance.")
     else:
         st.warning("No data found.")
