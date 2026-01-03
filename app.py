@@ -20,79 +20,115 @@ st.set_page_config(
     page_icon="📈"
 )
 
-# --- CUSTOM CSS FOR SLEEK PROFESSIONAL LOOK ---
+# --- CUSTOM CSS FOR DEEP NAVY / CYAN MONOCHROMATIC LOOK ---
 st.markdown("""
 <style>
-    /* Main Background and Text */
+    /* 1. Primary Background: Deep Navy */
     [data-testid="stAppViewContainer"] {
-        background-color: #0e1117;
-        color: #e6edf3;
+        background-color: #0A0F1E;
+        color: #FFFFFF;
     }
     
-    /* Sidebar Styling */
+    /* 2. Sidebar Background: Slightly lighter dark gray-blue */
     [data-testid="stSidebar"] {
-        background-color: #161b22;
-        border-right: 1px solid #30363d;
+        background-color: #12161F;
+        border-right: 1px solid #1E252F;
     }
     
-    /* Custom Metric Cards */
+    /* 3. Metric/Card Backgrounds */
     div[data-testid="metric-container"] {
-        background-color: #21262d;
-        border: 1px solid #30363d;
+        background-color: #1E252F;
+        border: 1px solid #2B3442;
         padding: 15px;
-        border-radius: 8px;
-        transition: transform 0.2s ease, border-color 0.2s ease;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    
-    div[data-testid="metric-container"]:hover {
-        border-color: #58a6ff;
-        transform: translateY(-2px);
+        border-radius: 6px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
     }
     
     [data-testid="stMetricLabel"] {
-        color: #8b949e;
+        color: #CCCCCC; /* Secondary Label Color */
         font-size: 14px;
     }
     
     [data-testid="stMetricValue"] {
-        color: #e6edf3;
+        color: #FFFFFF; /* Primary Data Color */
         font-weight: 600;
     }
-
-    /* Tabs Styling */
+    
+    /* 4. Tabs Styling */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        border-bottom: 1px solid #30363d;
+        gap: 8px;
+        border-bottom: 1px solid #333333;
     }
 
     .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #0e1117;
-        border-radius: 4px 4px 0px 0px;
-        color: #8b949e;
+        background-color: #0A0F1E;
+        color: #CCCCCC;
+        border: 1px solid transparent;
     }
 
     .stTabs [aria-selected="true"] {
-        background-color: #21262d;
-        color: #58a6ff;
-        border-bottom: 2px solid #58a6ff;
+        background-color: #1E252F;
+        color: #00FFFF; /* Cyan Accent */
+        border-bottom: 2px solid #00FFFF;
     }
     
-    /* Headers */
+    /* 5. Inputs and Selectboxes */
+    .stSelectbox div[data-baseweb="select"] div {
+        background-color: #1E252F;
+        color: white;
+        border-color: #333333;
+    }
+    
+    /* Global Text Adjustments */
     h1, h2, h3 {
-        font-family: 'Segoe UI', Helvetica, Arial, sans-serif;
-        font-weight: 600;
-        letter-spacing: -0.5px;
+        color: #FFFFFF !important;
+        font-family: 'Segoe UI', sans-serif;
     }
     
-    /* Adjust top padding */
-    .block-container {
-        padding-top: 2rem;
+    p, li, span {
+        color: #CCCCCC;
+    }
+    
+    /* Divider Color */
+    hr {
+        border-color: #333333;
     }
 </style>
 """, unsafe_allow_html=True)
+
+# --- THEME CONFIGURATION FOR PLOTLY ---
+# We define a strict color map here to use across all charts
+THEME = {
+    "background": "#0A0F1E",
+    "paper_bg": "#0A0F1E", # Transparent/Matching
+    "grid": "#333333",
+    "text": "#FFFFFF",
+    "bullish": "#00FFFF",  # Cyan (Growth/Up)
+    "bearish": "#8080FF",  # Mid-tone Blue (Down) - replacing Red
+    "accent_fill": "rgba(102, 204, 255, 0.2)", # Translucent Lighter Blue
+    "line_primary": "#00FFFF",
+    "line_secondary": "#8080FF"
+}
+
+def apply_theme(fig):
+    """Applies the monochromatic blue/cyan theme to a Plotly figure."""
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=THEME['paper_bg'],
+        plot_bgcolor=THEME['background'],
+        font=dict(color=THEME['text']),
+        xaxis=dict(
+            gridcolor=THEME['grid'], 
+            showgrid=True,
+            zerolinecolor=THEME['grid']
+        ),
+        yaxis=dict(
+            gridcolor=THEME['grid'], 
+            showgrid=True,
+            zerolinecolor=THEME['grid']
+        ),
+    )
+    return fig
 
 # --- SIDEBAR SETTINGS ---
 st.sidebar.title("⚙️ Configuration")
@@ -136,11 +172,8 @@ ticker_symbol = asset_map[selected_asset_name]
 # --- SHARED HELPER FUNCTIONS ---
 
 def get_data_weekly(ticker, weeks=52):
-    """Fetches daily data for Weekly Analysis."""
-    # Ensure enough data for ML training (at least 5 years)
     min_history_weeks = 300 
     fetch_weeks = max(weeks, min_history_weeks)
-    
     period_days = fetch_weeks * 7 + 30
     end_date = datetime.now()
     start_date = end_date - timedelta(days=period_days)
@@ -151,7 +184,6 @@ def get_data_weekly(ticker, weeks=52):
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         data = data.reset_index()
         data['Date'] = pd.to_datetime(data['Date'])
-        # Adjust to start of week (Monday)
         data['Week_Start'] = data['Date'].apply(lambda x: x - timedelta(days=x.weekday()))
         return data
     except Exception as e:
@@ -159,7 +191,6 @@ def get_data_weekly(ticker, weeks=52):
         return None
 
 def get_data_intraday(ticker, target_date, interval="5m"):
-    """Fetches intraday data. Interval can be 5m (Intraday) or 15m (OSOK)."""
     start_date = target_date - timedelta(days=2) 
     end_date = target_date + timedelta(days=2)
     
@@ -173,7 +204,6 @@ def get_data_intraday(ticker, target_date, interval="5m"):
             data['Datetime'] = data['Datetime'].dt.tz_localize('UTC')
         
         data['Datetime_NY'] = data['Datetime'].dt.tz_convert('America/New_York')
-        
         mask = data['Datetime_NY'].dt.date == target_date
         return data.loc[mask].copy()
     except Exception as e:
@@ -189,37 +219,16 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def prepare_osok_ml_data(df):
-    """
-    Prepares features specifically based on OSOK concepts:
-    - 20 Week Range Position (Premium/Discount)
-    - Distance from Equilibrium
-    - Recent Momentum
-    """
-    # Group by week to get weekly OHLC
     logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
     w_df = df.groupby('Week_Start').agg(logic).sort_index()
-    
-    # Feature Engineering
     w_df['20W_High'] = w_df['High'].rolling(window=20).max()
     w_df['20W_Low'] = w_df['Low'].rolling(window=20).min()
     w_df['Equilibrium'] = (w_df['20W_High'] + w_df['20W_Low']) / 2
-    
-    # Feature 1: PD Factor (0 = Deep Discount, 1 = Deep Premium)
     w_df['PD_Factor'] = (w_df['Close'] - w_df['20W_Low']) / (w_df['20W_High'] - w_df['20W_Low'])
-    
-    # Feature 2: Distance from Equilibrium (%)
     w_df['Dist_Eq'] = (w_df['Close'] - w_df['Equilibrium']) / w_df['Equilibrium']
-    
-    # Feature 3: RSI (Momentum)
     w_df['RSI'] = calculate_rsi(w_df['Close'], 14)
-    
-    # Feature 4: Previous Week Return
     w_df['Prev_Ret'] = w_df['Close'].pct_change()
-    
-    # TARGET: Will NEXT week close higher than it opens? (Bullish Candle)
-    # Shift(-1) looks at the future
     w_df['Target'] = (w_df['Close'].shift(-1) > w_df['Open'].shift(-1)).astype(int)
-    
     w_df = w_df.dropna()
     return w_df
 
@@ -227,16 +236,11 @@ def train_osok_model(ml_df):
     feature_cols = ['PD_Factor', 'Dist_Eq', 'RSI', 'Prev_Ret']
     X = ml_df[feature_cols]
     y = ml_df['Target']
-    
-    # Split Data (Shuffle=False for time series to test on latest data)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-    
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
     model.fit(X_train, y_train)
-    
     preds = model.predict(X_test)
     acc = accuracy_score(y_test, preds)
-    
     return model, acc, feature_cols
 
 # --- WEEKLY ANALYSIS FUNCTIONS ---
@@ -290,26 +294,21 @@ def calculate_seasonal_path(weeks_dict, lookback):
     if not seasonal_data: return None
     return pd.DataFrame(seasonal_data).groupby('DayNum').agg({'PctChange': 'mean', 'DayName': 'first'}).reset_index()
 
-# --- PREDICTION ENGINE (MARKOV CHAIN) ---
 def predict_next_week(stats_df, current_profile):
     if stats_df.empty: return None
     df_sorted = stats_df.sort_values('Week Start', ascending=True).copy()
     df_sorted['Next_Profile'] = df_sorted['Profile'].shift(-1)
     transitions = df_sorted[df_sorted['Profile'] == current_profile]
-    
-    if transitions.empty or transitions['Next_Profile'].dropna().empty:
-        return None
-    
+    if transitions.empty or transitions['Next_Profile'].dropna().empty: return None
     counts = transitions['Next_Profile'].value_counts(normalize=True)
     return dict(sorted(counts.to_dict().items(), key=lambda item: item[1], reverse=True))
 
-# --- INTRADAY ANALYSIS FUNCTIONS ---
 def identify_intraday_profile(df):
     if df.empty: return None
     midnight_bar = df[df['Datetime_NY'].dt.hour == 0]
     if midnight_bar.empty: midnight_open = df.iloc[0]['Open']
     else: midnight_open = midnight_bar.iloc[0]['Open']
-        
+    
     judas_start = time(0, 0)
     judas_end = time(2, 0)
     current_price = df.iloc[-1]['Close']
@@ -322,14 +321,12 @@ def identify_intraday_profile(df):
     low_time = df.loc[df['Low'].idxmin(), 'Datetime_NY'].time()
     
     profile, desc = "Consolidation", "Choppy."
-    
     if is_bullish:
         if judas_start <= low_time <= judas_end: profile, desc = "London Normal (Buy)", "Judas Swing Low (0-2 AM)."
         elif low_time > judas_end: profile, desc = "London Delayed (Buy)", "Low formed after 2 AM."
     else:
         if judas_start <= high_time <= judas_end: profile, desc = "London Normal (Sell)", "Judas Swing High (0-2 AM)."
         elif high_time > judas_end: profile, desc = "London Delayed (Sell)", "High formed after 2 AM."
-
     return {"Trend": trend, "Profile": profile, "Description": desc, "Midnight_Open": midnight_open, "High": day_high, "Low": day_low, "High_Time": high_time, "Low_Time": low_time}
 
 # =========================================
@@ -340,13 +337,11 @@ if analysis_mode == "Weekly Profiles":
     
     st.sidebar.subheader("Weekly Settings")
     lookback_weeks = st.sidebar.slider("Weeks to Display", 1, 20, 4)
-    # Default high for better prediction accuracy
     stats_lookback = st.sidebar.slider("Stats Range (Prediction History)", 52, 300, 150)
     
     st.title(f"📊 Weekly Profile Identifier: {selected_asset_name}")
     
     with st.spinner(f"Fetching weekly data for {ticker_symbol}..."):
-        # Fetching extra data handled by get_data_weekly optimization
         df = get_data_weekly(ticker_symbol, max(lookback_weeks, stats_lookback) + 3)
 
     if df is not None:
@@ -358,7 +353,6 @@ if analysis_mode == "Weekly Profiles":
             st.error("No data.")
         else:
             stats_data = []
-            # Calculate stats over the full requested range
             for w_start in week_keys[:stats_lookback]:
                 w_df = weeks.get_group(w_start)
                 if len(w_df) >= 3:
@@ -409,6 +403,8 @@ if analysis_mode == "Weekly Profiles":
                 
                 # METRICS ROW
                 c1, c2, c3, c4 = st.columns(4)
+                # Note: Standard metric colors (Red/Green) are hard to override without breaking API
+                # But our chart colors will handle the heavy lifting for the theme
                 c1.metric("Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
                 c2.metric("Profile", analysis["Profile"])
                 c3.metric("High Day", analysis["High_Day"])
@@ -416,12 +412,23 @@ if analysis_mode == "Weekly Profiles":
                 
                 st.caption(f"**Logic:** {analysis['Description']}")
                 
-                fig = go.Figure(data=[go.Candlestick(x=curr_df['Date'], open=curr_df['Open'], high=curr_df['High'], low=curr_df['Low'], close=curr_df['Close'])])
-                if prev_data:
-                    fig.add_hline(y=prev_data['PWH'], line_dash="dash", line_color="orange", annotation_text="PWH")
-                    fig.add_hline(y=prev_data['PWL'], line_dash="dash", line_color="orange", annotation_text="PWL", annotation_position="bottom right")
+                # Plotly Chart with Monochromatic Scheme
+                fig = go.Figure(data=[go.Candlestick(
+                    x=curr_df['Date'], 
+                    open=curr_df['Open'], 
+                    high=curr_df['High'], 
+                    low=curr_df['Low'], 
+                    close=curr_df['Close'],
+                    increasing_line_color=THEME['bullish'], # Cyan
+                    decreasing_line_color=THEME['bearish']  # Mid-Tone Blue
+                )])
                 
-                fig.update_layout(title=f"Weekly Chart: {selected_asset_name}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                if prev_data:
+                    fig.add_hline(y=prev_data['PWH'], line_dash="dash", line_color=THEME['text'], opacity=0.5, annotation_text="PWH")
+                    fig.add_hline(y=prev_data['PWL'], line_dash="dash", line_color=THEME['text'], opacity=0.5, annotation_text="PWL", annotation_position="bottom right")
+                
+                fig.update_layout(title=f"Weekly Chart: {selected_asset_name}", height=600, xaxis_rangeslider_visible=False)
+                fig = apply_theme(fig)
                 st.plotly_chart(fig, use_container_width=True)
                 
                 if not stats_df.empty:
@@ -434,8 +441,9 @@ if analysis_mode == "Weekly Profiles":
                     avg_path = calculate_seasonal_path(weeks, stats_lookback)
                     if avg_path is not None:
                         fig_seas = px.line(avg_path, x="DayName", y="PctChange", markers=True, title="Composite Weekly Path (% vs Mon Open)")
-                        fig_seas.add_hline(y=0, line_dash="dot", line_color="white")
-                        fig_seas.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                        fig_seas.update_traces(line_color=THEME['line_primary'])
+                        fig_seas.add_hline(y=0, line_dash="dot", line_color=THEME['text'])
+                        fig_seas = apply_theme(fig_seas)
                         st.plotly_chart(fig_seas, use_container_width=True)
                     
                     st.divider()
@@ -446,15 +454,16 @@ if analysis_mode == "Weekly Profiles":
                         h_c = stats_df['High_Day'].value_counts().reindex(days, fill_value=0)
                         l_c = stats_df['Low_Day'].value_counts().reindex(days, fill_value=0)
                         df_c = pd.DataFrame({"Day": days, "Highs": h_c.values, "Lows": l_c.values}).melt(id_vars="Day", var_name="Type", value_name="Count")
-                        fig_d = px.bar(df_c, x="Day", y="Count", color="Type", barmode="group", color_discrete_map={"Highs": "#EF553B", "Lows": "#00CC96"})
-                        fig_d.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                        # Highs = Cyan, Lows = Mid-Blue
+                        fig_d = px.bar(df_c, x="Day", y="Count", color="Type", barmode="group", color_discrete_map={"Highs": THEME['bullish'], "Lows": THEME['bearish']})
+                        fig_d = apply_theme(fig_d)
                         st.plotly_chart(fig_d, use_container_width=True)
                     with c_b:
                         st.subheader("Profile Distribution")
                         profile_counts = stats_df['Profile'].value_counts().reset_index()
                         profile_counts.columns = ['Profile', 'Count'] 
-                        fig_p = px.pie(profile_counts, names='Profile', values='Count', hole=0.4)
-                        fig_p.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                        fig_p = px.pie(profile_counts, names='Profile', values='Count', hole=0.4, color_discrete_sequence=px.colors.sequential.Blues_r)
+                        fig_p = apply_theme(fig_p)
                         st.plotly_chart(fig_p, use_container_width=True)
 
 elif analysis_mode == "Intraday Profiles":
@@ -500,24 +509,35 @@ elif analysis_mode == "Intraday Profiles":
         st.info(f"**Scenario:** {res['Description']}")
         
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df_intra['Datetime_NY'], open=df_intra['Open'], high=df_intra['High'], low=df_intra['Low'], close=df_intra['Close'], name="Price (5m)"))
+        fig.add_trace(go.Candlestick(
+            x=df_intra['Datetime_NY'], 
+            open=df_intra['Open'], 
+            high=df_intra['High'], 
+            low=df_intra['Low'], 
+            close=df_intra['Close'], 
+            name="Price (5m)",
+            increasing_line_color=THEME['bullish'],
+            decreasing_line_color=THEME['bearish']
+        ))
         fig.add_hline(y=res['Midnight_Open'], line_dash="dot", line_color="white", annotation_text="Midnight Open")
         
         base_dt = pd.to_datetime(target_date).tz_localize('America/New_York') if df_intra['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date)
         def to_ms(h, m): return base_dt.replace(hour=h, minute=m).timestamp() * 1000
 
-        fig.add_vline(x=to_ms(0,0), line_dash="solid", line_color="gray", annotation_text="00:00 NY")
-        fig.add_vline(x=to_ms(2,0), line_dash="solid", line_color="gray", annotation_text="02:00 NY")
+        fig.add_vline(x=to_ms(0,0), line_dash="solid", line_color=THEME['grid'], annotation_text="00:00 NY")
+        fig.add_vline(x=to_ms(2,0), line_dash="solid", line_color=THEME['grid'], annotation_text="02:00 NY")
         
         if show_killzones:
-            fig.add_vrect(x0=to_ms(2,0), x1=to_ms(5,0), fillcolor="green", opacity=0.07, annotation_text="London KZ", annotation_position="top left")
-            fig.add_vrect(x0=to_ms(7,0), x1=to_ms(10,0), fillcolor="orange", opacity=0.07, annotation_text="NY KZ", annotation_position="top left")
+            # Using requested accent fills: Translucent lighter blue (#66CCFF)
+            fig.add_vrect(x0=to_ms(2,0), x1=to_ms(5,0), fillcolor=THEME['bullish'], opacity=0.1, annotation_text="London KZ", annotation_position="top left")
+            fig.add_vrect(x0=to_ms(7,0), x1=to_ms(10,0), fillcolor=THEME['bearish'], opacity=0.1, annotation_text="NY KZ", annotation_position="top left")
 
         if prev_day_stats:
-            fig.add_hline(y=prev_day_stats['PDH'], line_dash="dash", line_color="#EF553B", annotation_text="PDH")
-            fig.add_hline(y=prev_day_stats['PDL'], line_dash="dash", line_color="#00CC96", annotation_text="PDL", annotation_position="bottom right")
+            fig.add_hline(y=prev_day_stats['PDH'], line_dash="dash", line_color=THEME['bullish'], opacity=0.6, annotation_text="PDH")
+            fig.add_hline(y=prev_day_stats['PDL'], line_dash="dash", line_color=THEME['bearish'], opacity=0.6, annotation_text="PDL", annotation_position="bottom right")
 
-        fig.update_layout(title=f"Intraday Chart (NY Time) - {target_date}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+        fig.update_layout(title=f"Intraday Chart (NY Time) - {target_date}", height=600, xaxis_rangeslider_visible=False)
+        fig = apply_theme(fig)
         st.plotly_chart(fig, use_container_width=True)
         
     else: st.error("No Intraday data found.")
@@ -529,11 +549,9 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
     st.markdown("Identifies the **20-Week Dealing Range** and uses **Machine Learning** to predict the bias.")
 
     with st.spinner("Analyzing 20-Week IPDA Range..."):
-        # Fetch lots of data for ML training
         df_full = get_data_weekly(ticker_symbol, weeks=300)
     
     if df_full is not None:
-        # Separate data for OSOK Visuals
         df_weekly = df_full.sort_values('Date')
         last_20 = df_weekly.iloc[-21:-1]
         current_week = df_weekly.iloc[-1]
@@ -546,7 +564,6 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         current_close = current_week['Close']
         in_premium = current_close > equilibrium
         
-        # Display Metrics in Cards
         m1, m2, m3 = st.columns(3)
         m1.metric("20-Week High (Liquidity)", f"{ipda_high:.2f}")
         m2.metric("20-Week Low (Liquidity)", f"{ipda_low:.2f}")
@@ -569,23 +586,18 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             3. **Target:** It trains a Random Forest to predict if the *Next Week* closes higher than it opens.
             """)
         
-        # Prepare Data
         ml_df = prepare_osok_ml_data(df_full)
         
         if len(ml_df) > 50:
-            # Train Model
             model, acc, feats = train_osok_model(ml_df)
-            
-            # Predict for Current/Next Week
-            # We take the latest known row to predict the future
             latest_features = ml_df.iloc[[-1]][feats]
-            pred_prob = model.predict_proba(latest_features)[0] # [Prob Bearish, Prob Bullish]
+            pred_prob = model.predict_proba(latest_features)[0] 
             
             ml_c1, ml_c2 = st.columns(2)
             
             with ml_c1:
                 st.metric("Model Backtest Accuracy", f"{acc*100:.1f}%")
-                bias_score = pred_prob[1] # Probability of Bullish
+                bias_score = pred_prob[1] 
                 
                 if bias_score > 0.55:
                     st.success(f"**ML Bias: BULLISH ({bias_score*100:.1f}%)**")
@@ -595,17 +607,17 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
                     st.warning(f"**ML Bias: NEUTRAL / CHOPPY**")
                     
             with ml_c2:
-                # Feature Importance
                 importances = pd.DataFrame({'Feature': feats, 'Importance': model.feature_importances_})
                 fig_imp = px.bar(importances, x='Importance', y='Feature', orientation='h', title="Factor Importance")
-                fig_imp.update_layout(template="plotly_dark", height=200, margin=dict(l=0, r=0, t=30, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                fig_imp.update_traces(marker_color=THEME['line_primary'])
+                fig_imp = apply_theme(fig_imp)
+                fig_imp.update_layout(height=200, margin=dict(l=0, r=0, t=30, b=0))
                 st.plotly_chart(fig_imp, use_container_width=True)
                 
         else:
             st.warning("Not enough historical data to train the OSOK ML model reliably.")
 
         st.divider()
-        # --- END ML INTEGRATION ---
 
         st.subheader("Execution: 15m OTE Setup")
         
@@ -622,7 +634,16 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             st.markdown(f"**Day:** {day_name} (:{status_color}[{'Anchor Point Potential' if is_anchor_day else 'Standard Trading Day'}])")
             
             fig_osok = go.Figure()
-            fig_osok.add_trace(go.Candlestick(x=df_15m['Datetime_NY'], open=df_15m['Open'], high=df_15m['High'], low=df_15m['Low'], close=df_15m['Close'], name="Price (15m)"))
+            fig_osok.add_trace(go.Candlestick(
+                x=df_15m['Datetime_NY'], 
+                open=df_15m['Open'], 
+                high=df_15m['High'], 
+                low=df_15m['Low'], 
+                close=df_15m['Close'], 
+                name="Price (15m)",
+                increasing_line_color=THEME['bullish'],
+                decreasing_line_color=THEME['bearish']
+            ))
             
             view_high = df_15m['High'].max()
             view_low = df_15m['Low'].min()
@@ -631,12 +652,12 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             if in_premium:
                 ote_62 = view_low + (diff * 0.62)
                 ote_79 = view_low + (diff * 0.79)
-                color_ote = "red"
+                color_ote = THEME['bearish']
                 bias_text = "Bearish OTE Zone (Sell)"
             else:
                 ote_62 = view_high - (diff * 0.62)
                 ote_79 = view_high - (diff * 0.79)
-                color_ote = "green"
+                color_ote = THEME['bullish']
                 bias_text = "Bullish OTE Zone (Buy)"
             
             fig_osok.add_hrect(y0=ote_62, y1=ote_79, fillcolor=color_ote, opacity=0.1, annotation_text=bias_text, annotation_position="right")
@@ -644,10 +665,11 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             base_dt_osok = pd.to_datetime(target_date_osok).tz_localize('America/New_York') if df_15m['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date_osok)
             def to_ms_osok(h, m): return base_dt_osok.replace(hour=h, minute=m).timestamp() * 1000
             
-            fig_osok.add_vrect(x0=to_ms_osok(2,0), x1=to_ms_osok(5,0), fillcolor="green", opacity=0.07, annotation_text="London KZ", annotation_position="top left")
-            fig_osok.add_vrect(x0=to_ms_osok(7,0), x1=to_ms_osok(10,0), fillcolor="orange", opacity=0.07, annotation_text="NY KZ", annotation_position="top left")
+            fig_osok.add_vrect(x0=to_ms_osok(2,0), x1=to_ms_osok(5,0), fillcolor=THEME['bullish'], opacity=0.07, annotation_text="London KZ", annotation_position="top left")
+            fig_osok.add_vrect(x0=to_ms_osok(7,0), x1=to_ms_osok(10,0), fillcolor=THEME['bearish'], opacity=0.07, annotation_text="NY KZ", annotation_position="top left")
 
-            fig_osok.update_layout(title=f"OSOK Execution (15m) - {target_date_osok}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+            fig_osok.update_layout(title=f"OSOK Execution (15m) - {target_date_osok}", height=600, xaxis_rangeslider_visible=False)
+            fig_osok = apply_theme(fig_osok)
             st.plotly_chart(fig_osok, use_container_width=True)
             
             st.info(f"**OSOK Checklist:** 1. Price in { 'Premium' if in_premium else 'Discount' } of 20-week range? ✅ | 2. Is it Mon/Tue/Wed? {'✅' if is_anchor_day else '❌'} | 3. Wait for price to hit the OTE Zone during a Kill Zone.")
