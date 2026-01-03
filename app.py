@@ -16,11 +16,86 @@ from sklearn.metrics import accuracy_score, classification_report
 st.set_page_config(
     page_title="ICT Profiles Analyzer + ML",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    page_icon="📈"
 )
 
+# --- CUSTOM CSS FOR SLEEK PROFESSIONAL LOOK ---
+st.markdown("""
+<style>
+    /* Main Background and Text */
+    [data-testid="stAppViewContainer"] {
+        background-color: #0e1117;
+        color: #e6edf3;
+    }
+    
+    /* Sidebar Styling */
+    [data-testid="stSidebar"] {
+        background-color: #161b22;
+        border-right: 1px solid #30363d;
+    }
+    
+    /* Custom Metric Cards */
+    div[data-testid="metric-container"] {
+        background-color: #21262d;
+        border: 1px solid #30363d;
+        padding: 15px;
+        border-radius: 8px;
+        transition: transform 0.2s ease, border-color 0.2s ease;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    div[data-testid="metric-container"]:hover {
+        border-color: #58a6ff;
+        transform: translateY(-2px);
+    }
+    
+    [data-testid="stMetricLabel"] {
+        color: #8b949e;
+        font-size: 14px;
+    }
+    
+    [data-testid="stMetricValue"] {
+        color: #e6edf3;
+        font-weight: 600;
+    }
+
+    /* Tabs Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+        border-bottom: 1px solid #30363d;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #0e1117;
+        border-radius: 4px 4px 0px 0px;
+        color: #8b949e;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background-color: #21262d;
+        color: #58a6ff;
+        border-bottom: 2px solid #58a6ff;
+    }
+    
+    /* Headers */
+    h1, h2, h3 {
+        font-family: 'Segoe UI', Helvetica, Arial, sans-serif;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+    }
+    
+    /* Adjust top padding */
+    .block-container {
+        padding-top: 2rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("Configuration")
+st.sidebar.title("⚙️ Configuration")
 
 # 1. Analysis Mode
 analysis_mode = st.sidebar.radio(
@@ -28,6 +103,8 @@ analysis_mode = st.sidebar.radio(
     ["Weekly Profiles", "Intraday Profiles", "One Shot One Kill (OSOK)"], 
     help="Weekly: Swing profiles. Intraday: London Protraction. OSOK: 20-Week Range + ML Prediction."
 )
+
+st.sidebar.markdown("---")
 
 # 2. Fallback Toggle
 use_etf = st.sidebar.checkbox("Use ETF Tickers (More Stable)", value=False, 
@@ -293,7 +370,9 @@ if analysis_mode == "Weekly Profiles":
             tab1, tab2 = st.tabs(["🔎 Current Analysis & Prediction", "📈 Statistical Probability"])
             
             with tab1:
-                sel_week = st.selectbox("Select Week", week_keys[:lookback_weeks], format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}")
+                col_sel, col_blank = st.columns([1, 2])
+                with col_sel:
+                    sel_week = st.selectbox("Select Week", week_keys[:lookback_weeks], format_func=lambda x: f"Week of {x.strftime('%Y-%m-%d')}")
                 
                 sel_idx = week_keys.index(sel_week)
                 prev_data = None
@@ -304,39 +383,45 @@ if analysis_mode == "Weekly Profiles":
                 curr_df = weeks.get_group(sel_week).copy()
                 analysis = identify_weekly_profile(curr_df)
                 
-                # --- PREDICTION SECTION ---
-                st.markdown("---")
-                st.markdown(f"### 🔮 Predictive Analysis: What's Next?")
                 
-                if not stats_df.empty:
-                    prediction = predict_next_week(stats_df, analysis['Profile'])
-                    col_pred1, col_pred2 = st.columns([1, 2])
-                    with col_pred1:
-                        st.info(f"**Context:** You are viewing a **{analysis['Profile']}**.")
-                    with col_pred2:
-                        if prediction:
-                            st.write(f"Historically (last {len(stats_df)} weeks), following this profile, the next week is:")
-                            for next_prof, prob in list(prediction.items())[:3]:
-                                st.caption(f"{next_prof} ({prob*100:.1f}%)")
-                                st.progress(prob)
-                        else:
-                            st.warning("Not enough historical occurrences of this specific profile to predict the next week.")
-                st.markdown("---")
+
+                # --- PREDICTION SECTION ---
+                st.markdown("### 🔮 Predictive Analysis")
+                
+                container = st.container()
+                with container:
+                    if not stats_df.empty:
+                        prediction = predict_next_week(stats_df, analysis['Profile'])
+                        col_pred1, col_pred2 = st.columns([1, 2])
+                        with col_pred1:
+                            st.info(f"**Current Profile:**\n\n{analysis['Profile']}")
+                        with col_pred2:
+                            if prediction:
+                                st.write(f"**Historical Probability (last {len(stats_df)} weeks):**")
+                                for next_prof, prob in list(prediction.items())[:3]:
+                                    st.caption(f"{next_prof} ({prob*100:.1f}%)")
+                                    st.progress(prob)
+                            else:
+                                st.warning("Not enough historical data to predict next week.")
+                
+                st.divider()
                 # --------------------------
                 
+                # METRICS ROW
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
                 c2.metric("Profile", analysis["Profile"])
                 c3.metric("High Day", analysis["High_Day"])
                 c4.metric("Low Day", analysis["Low_Day"])
-                st.info(f"**Logic:** {analysis['Description']}")
+                
+                st.caption(f"**Logic:** {analysis['Description']}")
                 
                 fig = go.Figure(data=[go.Candlestick(x=curr_df['Date'], open=curr_df['Open'], high=curr_df['High'], low=curr_df['Low'], close=curr_df['Close'])])
                 if prev_data:
                     fig.add_hline(y=prev_data['PWH'], line_dash="dash", line_color="orange", annotation_text="PWH")
                     fig.add_hline(y=prev_data['PWL'], line_dash="dash", line_color="orange", annotation_text="PWL", annotation_position="bottom right")
                 
-                fig.update_layout(title=f"Weekly Chart: {selected_asset_name}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+                fig.update_layout(title=f"Weekly Chart: {selected_asset_name}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig, use_container_width=True)
                 
                 if not stats_df.empty:
@@ -350,10 +435,10 @@ if analysis_mode == "Weekly Profiles":
                     if avg_path is not None:
                         fig_seas = px.line(avg_path, x="DayName", y="PctChange", markers=True, title="Composite Weekly Path (% vs Mon Open)")
                         fig_seas.add_hline(y=0, line_dash="dot", line_color="white")
-                        fig_seas.update_layout(template="plotly_dark")
+                        fig_seas.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                         st.plotly_chart(fig_seas, use_container_width=True)
                     
-                    st.markdown("---")
+                    st.divider()
                     c_a, c_b = st.columns(2)
                     with c_a:
                         st.subheader("Day Probability")
@@ -362,14 +447,14 @@ if analysis_mode == "Weekly Profiles":
                         l_c = stats_df['Low_Day'].value_counts().reindex(days, fill_value=0)
                         df_c = pd.DataFrame({"Day": days, "Highs": h_c.values, "Lows": l_c.values}).melt(id_vars="Day", var_name="Type", value_name="Count")
                         fig_d = px.bar(df_c, x="Day", y="Count", color="Type", barmode="group", color_discrete_map={"Highs": "#EF553B", "Lows": "#00CC96"})
-                        fig_d.update_layout(template="plotly_dark")
+                        fig_d.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                         st.plotly_chart(fig_d, use_container_width=True)
                     with c_b:
                         st.subheader("Profile Distribution")
                         profile_counts = stats_df['Profile'].value_counts().reset_index()
                         profile_counts.columns = ['Profile', 'Count'] 
                         fig_p = px.pie(profile_counts, names='Profile', values='Count', hole=0.4)
-                        fig_p.update_layout(template="plotly_dark")
+                        fig_p.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                         st.plotly_chart(fig_p, use_container_width=True)
 
 elif analysis_mode == "Intraday Profiles":
@@ -411,6 +496,7 @@ elif analysis_mode == "Intraday Profiles":
         c2.metric("Profile", res['Profile'])
         c3.metric("High Time", str(res['High_Time'])[:5])
         c4.metric("Low Time", str(res['Low_Time'])[:5])
+        
         st.info(f"**Scenario:** {res['Description']}")
         
         fig = go.Figure()
@@ -431,7 +517,7 @@ elif analysis_mode == "Intraday Profiles":
             fig.add_hline(y=prev_day_stats['PDH'], line_dash="dash", line_color="#EF553B", annotation_text="PDH")
             fig.add_hline(y=prev_day_stats['PDL'], line_dash="dash", line_color="#00CC96", annotation_text="PDL", annotation_position="bottom right")
 
-        fig.update_layout(title=f"Intraday Chart (NY Time) - {target_date}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+        fig.update_layout(title=f"Intraday Chart (NY Time) - {target_date}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig, use_container_width=True)
         
     else: st.error("No Intraday data found.")
@@ -460,12 +546,14 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         current_close = current_week['Close']
         in_premium = current_close > equilibrium
         
+        # Display Metrics in Cards
         m1, m2, m3 = st.columns(3)
         m1.metric("20-Week High (Liquidity)", f"{ipda_high:.2f}")
         m2.metric("20-Week Low (Liquidity)", f"{ipda_low:.2f}")
         m3.metric("Current State", "PREMIUM (Sell)" if in_premium else "DISCOUNT (Buy)", 
                   delta="-Sell" if in_premium else "+Buy", delta_color="inverse")
         
+        st.markdown("### Range Position")
         st.progress((current_close - ipda_low) / ipda_range)
         st.caption(f"Price is at {((current_close - ipda_low) / ipda_range)*100:.1f}% of the 20-week range.")
 
@@ -510,7 +598,7 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
                 # Feature Importance
                 importances = pd.DataFrame({'Feature': feats, 'Importance': model.feature_importances_})
                 fig_imp = px.bar(importances, x='Importance', y='Feature', orientation='h', title="Factor Importance")
-                fig_imp.update_layout(template="plotly_dark", height=200, margin=dict(l=0, r=0, t=30, b=0))
+                fig_imp.update_layout(template="plotly_dark", height=200, margin=dict(l=0, r=0, t=30, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_imp, use_container_width=True)
                 
         else:
@@ -559,7 +647,7 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             fig_osok.add_vrect(x0=to_ms_osok(2,0), x1=to_ms_osok(5,0), fillcolor="green", opacity=0.07, annotation_text="London KZ", annotation_position="top left")
             fig_osok.add_vrect(x0=to_ms_osok(7,0), x1=to_ms_osok(10,0), fillcolor="orange", opacity=0.07, annotation_text="NY KZ", annotation_position="top left")
 
-            fig_osok.update_layout(title=f"OSOK Execution (15m) - {target_date_osok}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+            fig_osok.update_layout(title=f"OSOK Execution (15m) - {target_date_osok}", template="plotly_dark", height=600, xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_osok, use_container_width=True)
             
             st.info(f"**OSOK Checklist:** 1. Price in { 'Premium' if in_premium else 'Discount' } of 20-week range? ✅ | 2. Is it Mon/Tue/Wed? {'✅' if is_anchor_day else '❌'} | 3. Wait for price to hit the OTE Zone during a Kill Zone.")
