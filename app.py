@@ -589,10 +589,7 @@ if analysis_mode == "Weekly Protocols (News & Logic)":
     """, unsafe_allow_html=True)
     
     st.markdown("### 🧩 Decision Tree Logic")
-    
-
-[Image of Decision Tree Logic Flowchart]
-
+    st.info("Visual Reference: Decision Tree Flow (Cluster -> Profile -> Deviation)")
     
     col_d1, col_d2 = st.columns([1, 1])
     
@@ -661,8 +658,6 @@ elif analysis_mode == "Weekly Profiles":
                 curr_df = weeks.get_group(sel_week).copy()
                 analysis = identify_weekly_profile(curr_df)
                 
-                
-
                 # --- PREDICTION SECTION ---
                 st.markdown("### 🔮 Predictive Analysis")
                 
