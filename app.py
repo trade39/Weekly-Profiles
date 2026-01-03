@@ -245,10 +245,11 @@ def get_financial_news():
         news = ticker.news
         stories = []
         for n in news[:5]:
+            # Use .get with a default empty string to avoid NoneType errors
             stories.append({
-                "Title": n.get('title'),
-                "Publisher": n.get('publisher'),
-                "Link": n.get('link'),
+                "Title": n.get('title', "No Title"),
+                "Publisher": n.get('publisher', "Unknown"),
+                "Link": n.get('link', "#"),
                 "Time": datetime.fromtimestamp(n.get('providerPublishTime', 0)).strftime('%Y-%m-%d %H:%M')
             })
         return stories
@@ -288,11 +289,16 @@ def determine_weekly_protocol(ff_df, stories, manual_override_date=None):
     exogenous_found = False
     exo_headline = ""
     
-    for s in stories:
-        if any(k.lower() in s['Title'].lower() for k in keywords):
-            exogenous_found = True
-            exo_headline = s['Title']
-            break
+    if stories:
+        for s in stories:
+            # Safety check: ensure title exists and is a string
+            title = s.get('Title', "")
+            if not isinstance(title, str): continue
+            
+            if any(k.lower() in title.lower() for k in keywords):
+                exogenous_found = True
+                exo_headline = title
+                break
             
     # 4. Decision Tree Logic
     protocol = {}
