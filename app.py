@@ -6,6 +6,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta, time
 import pytz
+import requests
+from bs4 import BeautifulSoup
+import re
 
 # ML Imports
 from sklearn.ensemble import RandomForestClassifier
@@ -79,13 +82,19 @@ st.markdown("""
         border-color: #333333;
     }
     
+    .stDateInput div[data-baseweb="input"] {
+        background-color: #1E252F;
+        color: white;
+        border-color: #333333;
+    }
+    
     /* Global Text Adjustments */
-    h1, h2, h3 {
+    h1, h2, h3, h4, h5, h6 {
         color: #FFFFFF !important;
         font-family: 'Segoe UI', sans-serif;
     }
     
-    p, li, span {
+    p, li, span, label {
         color: #CCCCCC;
     }
     
@@ -93,19 +102,23 @@ st.markdown("""
     hr {
         border-color: #333333;
     }
+    
+    /* Table Styling */
+    [data-testid="stDataFrame"] {
+        border: 1px solid #333333;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- THEME CONFIGURATION FOR PLOTLY ---
-# We define a strict color map here to use across all charts
 THEME = {
     "background": "#0A0F1E",
-    "paper_bg": "#0A0F1E", # Transparent/Matching
+    "paper_bg": "#0A0F1E", 
     "grid": "#333333",
     "text": "#FFFFFF",
     "bullish": "#00FFFF",  # Cyan (Growth/Up)
-    "bearish": "#8080FF",  # Mid-tone Blue (Down) - replacing Red
-    "accent_fill": "rgba(102, 204, 255, 0.2)", # Translucent Lighter Blue
+    "bearish": "#8080FF",  # Mid-tone Blue (Down)
+    "accent_fill": "rgba(102, 204, 255, 0.2)",
     "line_primary": "#00FFFF",
     "line_secondary": "#8080FF"
 }
@@ -117,16 +130,8 @@ def apply_theme(fig):
         paper_bgcolor=THEME['paper_bg'],
         plot_bgcolor=THEME['background'],
         font=dict(color=THEME['text']),
-        xaxis=dict(
-            gridcolor=THEME['grid'], 
-            showgrid=True,
-            zerolinecolor=THEME['grid']
-        ),
-        yaxis=dict(
-            gridcolor=THEME['grid'], 
-            showgrid=True,
-            zerolinecolor=THEME['grid']
-        ),
+        xaxis=dict(gridcolor=THEME['grid'], showgrid=True, zerolinecolor=THEME['grid']),
+        yaxis=dict(gridcolor=THEME['grid'], showgrid=True, zerolinecolor=THEME['grid']),
     )
     return fig
 
@@ -136,8 +141,8 @@ st.sidebar.title("⚙️ Configuration")
 # 1. Analysis Mode
 analysis_mode = st.sidebar.radio(
     "Analysis Mode", 
-    ["Weekly Profiles", "Intraday Profiles", "One Shot One Kill (OSOK)"], 
-    help="Weekly: Swing profiles. Intraday: London Protraction. OSOK: 20-Week Range + ML Prediction."
+    ["Weekly Protocols (News & Logic)", "Weekly Profiles", "Intraday Profiles", "One Shot One Kill (OSOK)"], 
+    help="Select the analytical framework."
 )
 
 st.sidebar.markdown("---")
@@ -169,9 +174,182 @@ else:
 selected_asset_name = st.sidebar.selectbox("Select Asset", list(asset_map.keys()))
 ticker_symbol = asset_map[selected_asset_name]
 
+# --- SCRAPING & NEWS FUNCTIONS ---
+
+@st.cache_data(ttl=3600)
+def scrape_forex_factory(week="this"):
+    """
+    Scrapes Forex Factory Calendar for High Impact (Red) News.
+    """
+    url = f"https://www.forexfactory.com/calendar?week={week}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return pd.DataFrame()
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find("table", class_="calendar__table")
+        
+        if not table:
+            return pd.DataFrame()
+
+        data = []
+        rows = table.find_all("tr", class_=lambda x: x and "calendar__row" in x and "calendar_row" in x)
+        
+        current_date = None
+        
+        for row in rows:
+            # Extract Date (merged cell handling)
+            date_cell = row.find("td", class_="calendar__date")
+            if date_cell and date_cell.text.strip():
+                current_date = date_cell.text.strip()
+            
+            # Extract Currency & Impact
+            currency = row.find("td", class_="calendar__currency").text.strip()
+            impact_cell = row.find("td", class_="calendar__impact")
+            impact_span = impact_cell.find("span") if impact_cell else None
+            impact_class = impact_span.get("class", []) if impact_span else []
+            
+            # Identify Impact Color
+            impact = "Low"
+            if "icon--impact-red" in impact_class: impact = "High"
+            elif "icon--impact-orange" in impact_class: impact = "Medium"
+            elif "icon--impact-yellow" in impact_class: impact = "Low"
+            
+            event_name = row.find("td", class_="calendar__event").text.strip()
+            time_str = row.find("td", class_="calendar__time").text.strip()
+            
+            if impact == "High": # Filter for Red Folder only
+                data.append({
+                    "Date": current_date,
+                    "Time": time_str,
+                    "Currency": currency,
+                    "Event": event_name,
+                    "Impact": impact
+                })
+                
+        return pd.DataFrame(data)
+
+    except Exception as e:
+        # Fail gracefully
+        return pd.DataFrame()
+
+def get_financial_news():
+    """Fetches latest news for EURUSD/USD to detect Exogenous Events."""
+    try:
+        ticker = yf.Ticker("EURUSD=X") 
+        news = ticker.news
+        stories = []
+        for n in news[:5]:
+            stories.append({
+                "Title": n.get('title'),
+                "Publisher": n.get('publisher'),
+                "Link": n.get('link'),
+                "Time": datetime.fromtimestamp(n.get('providerPublishTime', 0)).strftime('%Y-%m-%d %H:%M')
+            })
+        return stories
+    except:
+        return []
+
+def determine_weekly_protocol(ff_df, stories, manual_override_date=None):
+    """
+    Implements the ICT Decision Tree for Weekly Profiles.
+    """
+    # 1. Setup Context
+    today = manual_override_date if manual_override_date else datetime.now().date()
+    day_name = today.strftime("%A")
+    
+    # 2. Analyze News Clustering (USD High Impact)
+    usd_news = ff_df[ff_df['Currency'] == 'USD'] if not ff_df.empty else pd.DataFrame()
+    
+    clustering = "Minimal/None"
+    red_folder_days = []
+    
+    if not usd_news.empty:
+        # Simple parsing of day names from the Date string
+        usd_news['DayName'] = usd_news['Date'].apply(lambda x: x.split(' ')[0] if x else "")
+        red_folder_days = usd_news['DayName'].unique().tolist()
+        
+        has_early = any(d in ['Mon', 'Tue'] for d in red_folder_days)
+        has_mid = any(d in ['Wed', 'Thu'] for d in red_folder_days)
+        has_late = any(d in ['Thu', 'Fri'] for d in red_folder_days)
+        
+        if has_early and not has_mid: clustering = "Early Week (Mon-Tue)"
+        elif has_mid and not has_early: clustering = "Midweek (Tue-Thu)"
+        elif has_late and not has_mid: clustering = "Late Week (Thu-Fri)"
+        elif has_mid: clustering = "Midweek (Tue-Thu)" # Default to Midweek if mixed
+    
+    # 3. Detect Exogenous Events (Keywords in Headlines)
+    keywords = ["War", "Sanctions", "Invasion", "Emergency", "Crisis", "Attack", "OPEC", "Rate Hike"]
+    exogenous_found = False
+    exo_headline = ""
+    
+    for s in stories:
+        if any(k.lower() in s['Title'].lower() for k in keywords):
+            exogenous_found = True
+            exo_headline = s['Title']
+            break
+            
+    # 4. Decision Tree Logic
+    protocol = {}
+    
+    # Default Rule: Avoid Monday
+    if day_name == "Monday":
+        if exogenous_found:
+            protocol = {
+                "Action": "⚠️ ALERT: Monday Exception Active",
+                "Profile": "Seek and Destroy / Early Expansion",
+                "Logic": f"Catalyst Detected: '{exo_headline}'. Volatility injection overrides default avoidance.",
+                "Bias": "Follow Displacement from H4 Arrays."
+            }
+        else:
+            protocol = {
+                "Action": "⛔ WAIT: Avoid Monday (Default)",
+                "Profile": "Data Insufficient / Consolidation",
+                "Logic": "No high-impact scheduled news & no exogenous shocks. Expect manipulation/range.",
+                "Bias": "Neutral / Internal Range Equilibrium."
+            }
+    else:
+        # Mid-Week Logic based on Clustering
+        if clustering == "Minimal/None":
+            protocol = {
+                "Action": "Trade Internal Range / Scalp",
+                "Profile": "Continued Consolidation",
+                "Logic": "Lack of scheduled volatility drivers.",
+                "Bias": "Range Bound (Fade Highs/Lows)."
+            }
+        elif clustering == "Early Week (Mon-Tue)":
+            protocol = {
+                "Action": "Look for Tuesday Reversal",
+                "Profile": "Early Week Expansion",
+                "Logic": "News loaded early; Mon/Tue forms the low/high of week.",
+                "Bias": "Expansion Wed-Fri."
+            }
+        elif clustering == "Midweek (Tue-Thu)":
+            protocol = {
+                "Action": "Wait for Midweek Manipulation",
+                "Profile": "Classic Expansion / Midweek Reversal",
+                "Logic": "Tue/Wed news acts as the Judas Swing.",
+                "Bias": "Reversal likely Wed; Trade Thu Expansion."
+            }
+        elif clustering == "Late Week (Thu-Fri)":
+            protocol = {
+                "Action": "Patience until Thursday",
+                "Profile": "Consolidation Reversal",
+                "Logic": "Early week trap; Real move comes late.",
+                "Bias": "Thu/Fri Reversal."
+            }
+            
+    return protocol, clustering, red_folder_days, exogenous_found
+
 # --- SHARED HELPER FUNCTIONS ---
 
 def get_data_weekly(ticker, weeks=52):
+    """Fetches daily data for Weekly Analysis."""
     min_history_weeks = 300 
     fetch_weeks = max(weeks, min_history_weeks)
     period_days = fetch_weeks * 7 + 30
@@ -184,6 +362,7 @@ def get_data_weekly(ticker, weeks=52):
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         data = data.reset_index()
         data['Date'] = pd.to_datetime(data['Date'])
+        # Adjust to start of week (Monday)
         data['Week_Start'] = data['Date'].apply(lambda x: x - timedelta(days=x.weekday()))
         return data
     except Exception as e:
@@ -191,6 +370,7 @@ def get_data_weekly(ticker, weeks=52):
         return None
 
 def get_data_intraday(ticker, target_date, interval="5m"):
+    """Fetches intraday data. Interval can be 5m (Intraday) or 15m (OSOK)."""
     start_date = target_date - timedelta(days=2) 
     end_date = target_date + timedelta(days=2)
     
@@ -204,6 +384,7 @@ def get_data_intraday(ticker, target_date, interval="5m"):
             data['Datetime'] = data['Datetime'].dt.tz_localize('UTC')
         
         data['Datetime_NY'] = data['Datetime'].dt.tz_convert('America/New_York')
+        
         mask = data['Datetime_NY'].dt.date == target_date
         return data.loc[mask].copy()
     except Exception as e:
@@ -219,16 +400,30 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def prepare_osok_ml_data(df):
+    # Group by week to get weekly OHLC
     logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
     w_df = df.groupby('Week_Start').agg(logic).sort_index()
+    
+    # Feature Engineering
     w_df['20W_High'] = w_df['High'].rolling(window=20).max()
     w_df['20W_Low'] = w_df['Low'].rolling(window=20).min()
     w_df['Equilibrium'] = (w_df['20W_High'] + w_df['20W_Low']) / 2
+    
+    # Feature 1: PD Factor (0 = Deep Discount, 1 = Deep Premium)
     w_df['PD_Factor'] = (w_df['Close'] - w_df['20W_Low']) / (w_df['20W_High'] - w_df['20W_Low'])
+    
+    # Feature 2: Distance from Equilibrium (%)
     w_df['Dist_Eq'] = (w_df['Close'] - w_df['Equilibrium']) / w_df['Equilibrium']
+    
+    # Feature 3: RSI (Momentum)
     w_df['RSI'] = calculate_rsi(w_df['Close'], 14)
+    
+    # Feature 4: Previous Week Return
     w_df['Prev_Ret'] = w_df['Close'].pct_change()
+    
+    # TARGET: Will NEXT week close higher than it opens? (Bullish Candle)
     w_df['Target'] = (w_df['Close'].shift(-1) > w_df['Open'].shift(-1)).astype(int)
+    
     w_df = w_df.dropna()
     return w_df
 
@@ -236,11 +431,16 @@ def train_osok_model(ml_df):
     feature_cols = ['PD_Factor', 'Dist_Eq', 'RSI', 'Prev_Ret']
     X = ml_df[feature_cols]
     y = ml_df['Target']
+    
+    # Split Data (Shuffle=False for time series)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
     model.fit(X_train, y_train)
+    
     preds = model.predict(X_test)
     acc = accuracy_score(y_test, preds)
+    
     return model, acc, feature_cols
 
 # --- WEEKLY ANALYSIS FUNCTIONS ---
@@ -299,7 +499,10 @@ def predict_next_week(stats_df, current_profile):
     df_sorted = stats_df.sort_values('Week Start', ascending=True).copy()
     df_sorted['Next_Profile'] = df_sorted['Profile'].shift(-1)
     transitions = df_sorted[df_sorted['Profile'] == current_profile]
-    if transitions.empty or transitions['Next_Profile'].dropna().empty: return None
+    
+    if transitions.empty or transitions['Next_Profile'].dropna().empty:
+        return None
+    
     counts = transitions['Next_Profile'].value_counts(normalize=True)
     return dict(sorted(counts.to_dict().items(), key=lambda item: item[1], reverse=True))
 
@@ -308,7 +511,7 @@ def identify_intraday_profile(df):
     midnight_bar = df[df['Datetime_NY'].dt.hour == 0]
     if midnight_bar.empty: midnight_open = df.iloc[0]['Open']
     else: midnight_open = midnight_bar.iloc[0]['Open']
-    
+        
     judas_start = time(0, 0)
     judas_end = time(2, 0)
     current_price = df.iloc[-1]['Close']
@@ -321,27 +524,107 @@ def identify_intraday_profile(df):
     low_time = df.loc[df['Low'].idxmin(), 'Datetime_NY'].time()
     
     profile, desc = "Consolidation", "Choppy."
+    
     if is_bullish:
         if judas_start <= low_time <= judas_end: profile, desc = "London Normal (Buy)", "Judas Swing Low (0-2 AM)."
         elif low_time > judas_end: profile, desc = "London Delayed (Buy)", "Low formed after 2 AM."
     else:
         if judas_start <= high_time <= judas_end: profile, desc = "London Normal (Sell)", "Judas Swing High (0-2 AM)."
         elif high_time > judas_end: profile, desc = "London Delayed (Sell)", "High formed after 2 AM."
+
     return {"Trend": trend, "Profile": profile, "Description": desc, "Midnight_Open": midnight_open, "High": day_high, "Low": day_low, "High_Time": high_time, "Low_Time": low_time}
 
 # =========================================
 # MAIN LOGIC BRANCHING
 # =========================================
 
-if analysis_mode == "Weekly Profiles":
+if analysis_mode == "Weekly Protocols (News & Logic)":
+    
+    st.sidebar.subheader("Protocol Settings")
+    sim_mode = st.sidebar.checkbox("Simulate Jan 3-9, 2026 Context", value=True, help="Forces the logic to run on the specific date mentioned.")
+    
+    st.title("📅 Weekly Profile Protocols")
+    st.markdown("Automated **Decision Tree** based on Economic Calendar & News Sentiment.")
+    
+    # 1. Data Fetching
+    with st.spinner("Scraping Forex Factory & News Feeds..."):
+        if sim_mode:
+            # MOCK DATA FOR JAN 3-9 2026 (As per prompt context)
+            stories = [
+                {"Title": "Oil prices steady amidst quiet trading", "Publisher": "Reuters", "Time": "2026-01-03 10:00"},
+                {"Title": "Post-holiday liquidity remains thin", "Publisher": "Bloomberg", "Time": "2026-01-03 09:30"}
+            ]
+            # Empty calendar as per prompt description
+            ff_df = pd.DataFrame(columns=["Date", "Time", "Currency", "Event", "Impact"]) 
+            # Force logic to think it is Monday Jan 5th 2026
+            current_date_ref = datetime(2026, 1, 5).date() 
+        else:
+            # REAL LIVE DATA
+            ff_df = scrape_forex_factory(week="this")
+            stories = get_financial_news()
+            current_date_ref = datetime.now().date()
+            
+    # 2. Logic Execution
+    protocol, clustering, days_with_news, exo_found = determine_weekly_protocol(ff_df, stories, manual_override_date=current_date_ref)
+    
+    # 3. UI Display - Top Level Status
+    col_stat1, col_stat2, col_stat3 = st.columns(3)
+    
+    col_stat1.metric("Current Day", current_date_ref.strftime("%A, %b %d"))
+    col_stat2.metric("News Clustering", clustering, delta="High Impact" if clustering != "Minimal/None" else "Low Vol", delta_color="off")
+    col_stat3.metric("Exogenous Shock?", "YES" if exo_found else "NO", delta="Override Active" if exo_found else "Normal", delta_color="inverse" if exo_found else "off")
+    
+    st.divider()
+    
+    # 4. Action Card
+    action_color = THEME['bearish'] if "Avoid" in protocol['Action'] else THEME['bullish']
+    st.markdown(f"""
+    <div style="background-color: #1E252F; border-left: 5px solid {action_color}; padding: 20px; border-radius: 5px;">
+        <h2 style="margin:0; color: white;">{protocol['Action']}</h2>
+        <h4 style="margin:5px 0; color: #CCCCCC;">Profile: {protocol['Profile']}</h4>
+        <p style="margin-top: 10px; font-style: italic;">"{protocol['Logic']}"</p>
+        <hr style="border-color: #333;">
+        <strong>Strategic Bias:</strong> {protocol['Bias']}
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("### 🧩 Decision Tree Logic")
+    
+
+[Image of Decision Tree Logic Flowchart]
+
+    
+    col_d1, col_d2 = st.columns([1, 1])
+    
+    with col_d1:
+        st.subheader("📰 Economic Calendar (High Impact)")
+        if not ff_df.empty:
+            # Formatting for display
+            display_df = ff_df[['Date', 'Time', 'Currency', 'Event']].copy()
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No High Impact (Red Folder) USD events scheduled for this period.")
+            
+    with col_d2:
+        st.subheader("📢 Hottest Stories (Sentiment)")
+        if stories:
+            for s in stories:
+                st.markdown(f"**[{s['Title']}]({s.get('Link', '#')})**")
+                st.caption(f"{s['Publisher']} • {s['Time']}")
+        else:
+            st.warning("No news headlines found.")
+
+elif analysis_mode == "Weekly Profiles":
     
     st.sidebar.subheader("Weekly Settings")
     lookback_weeks = st.sidebar.slider("Weeks to Display", 1, 20, 4)
+    # Default high for better prediction accuracy
     stats_lookback = st.sidebar.slider("Stats Range (Prediction History)", 52, 300, 150)
     
     st.title(f"📊 Weekly Profile Identifier: {selected_asset_name}")
     
     with st.spinner(f"Fetching weekly data for {ticker_symbol}..."):
+        # Fetching extra data handled by get_data_weekly optimization
         df = get_data_weekly(ticker_symbol, max(lookback_weeks, stats_lookback) + 3)
 
     if df is not None:
@@ -353,6 +636,7 @@ if analysis_mode == "Weekly Profiles":
             st.error("No data.")
         else:
             stats_data = []
+            # Calculate stats over the full requested range
             for w_start in week_keys[:stats_lookback]:
                 w_df = weeks.get_group(w_start)
                 if len(w_df) >= 3:
@@ -403,8 +687,6 @@ if analysis_mode == "Weekly Profiles":
                 
                 # METRICS ROW
                 c1, c2, c3, c4 = st.columns(4)
-                # Note: Standard metric colors (Red/Green) are hard to override without breaking API
-                # But our chart colors will handle the heavy lifting for the theme
                 c1.metric("Trend", analysis["Trend"], delta_color="normal" if analysis["Trend"]=="Bullish" else "inverse")
                 c2.metric("Profile", analysis["Profile"])
                 c3.metric("High Day", analysis["High_Day"])
@@ -549,9 +831,11 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
     st.markdown("Identifies the **20-Week Dealing Range** and uses **Machine Learning** to predict the bias.")
 
     with st.spinner("Analyzing 20-Week IPDA Range..."):
+        # Fetch lots of data for ML training
         df_full = get_data_weekly(ticker_symbol, weeks=300)
     
     if df_full is not None:
+        # Separate data for OSOK Visuals
         df_weekly = df_full.sort_values('Date')
         last_20 = df_weekly.iloc[-21:-1]
         current_week = df_weekly.iloc[-1]
@@ -564,6 +848,7 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         current_close = current_week['Close']
         in_premium = current_close > equilibrium
         
+        # Display Metrics in Cards
         m1, m2, m3 = st.columns(3)
         m1.metric("20-Week High (Liquidity)", f"{ipda_high:.2f}")
         m2.metric("20-Week Low (Liquidity)", f"{ipda_low:.2f}")
@@ -586,18 +871,23 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             3. **Target:** It trains a Random Forest to predict if the *Next Week* closes higher than it opens.
             """)
         
+        # Prepare Data
         ml_df = prepare_osok_ml_data(df_full)
         
         if len(ml_df) > 50:
+            # Train Model
             model, acc, feats = train_osok_model(ml_df)
+            
+            # Predict for Current/Next Week
+            # We take the latest known row to predict the future
             latest_features = ml_df.iloc[[-1]][feats]
-            pred_prob = model.predict_proba(latest_features)[0] 
+            pred_prob = model.predict_proba(latest_features)[0] # [Prob Bearish, Prob Bullish]
             
             ml_c1, ml_c2 = st.columns(2)
             
             with ml_c1:
                 st.metric("Model Backtest Accuracy", f"{acc*100:.1f}%")
-                bias_score = pred_prob[1] 
+                bias_score = pred_prob[1] # Probability of Bullish
                 
                 if bias_score > 0.55:
                     st.success(f"**ML Bias: BULLISH ({bias_score*100:.1f}%)**")
@@ -607,6 +897,7 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
                     st.warning(f"**ML Bias: NEUTRAL / CHOPPY**")
                     
             with ml_c2:
+                # Feature Importance
                 importances = pd.DataFrame({'Feature': feats, 'Importance': model.feature_importances_})
                 fig_imp = px.bar(importances, x='Importance', y='Feature', orientation='h', title="Factor Importance")
                 fig_imp.update_traces(marker_color=THEME['line_primary'])
@@ -618,6 +909,7 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             st.warning("Not enough historical data to train the OSOK ML model reliably.")
 
         st.divider()
+        # --- END ML INTEGRATION ---
 
         st.subheader("Execution: 15m OTE Setup")
         
