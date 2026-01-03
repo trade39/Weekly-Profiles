@@ -9,7 +9,7 @@ import pytz
 import requests
 from bs4 import BeautifulSoup
 import re
-import cot_reports as cot  # NEW IMPORT
+import cot_reports as cot
 
 # ML Imports
 from sklearn.ensemble import RandomForestClassifier
@@ -149,11 +149,12 @@ st.sidebar.title("⚙️ Configuration")
 analysis_mode = st.sidebar.radio(
     "Analysis Mode", 
     [
+        "Top Down Analysis (TDA)", # NEW MODE
         "Weekly Protocols (News & Logic)", 
         "Weekly Profiles", 
         "Intraday Profiles", 
         "One Shot One Kill (OSOK)",
-        "COT Quant Terminal"  # NEW MODE
+        "COT Quant Terminal"
     ], 
     help="Select the analytical framework."
 )
@@ -464,6 +465,57 @@ def get_data_intraday(ticker, target_date, interval="5m"):
         st.error(f"Error fetching intraday data: {e}")
         return None
 
+# --- NEW HELPERS FOR TOP DOWN ANALYSIS ---
+def calculate_williams_r(df, period=14):
+    """Calculates Williams %R for Market Sentiment."""
+    hh = df['High'].rolling(period).max()
+    ll = df['Low'].rolling(period).min()
+    df['WilliamsR'] = -100 * ((hh - df['Close']) / (hh - ll))
+    return df
+
+def get_smt_pair(asset_name):
+    """Returns the correlated asset for SMT Divergence."""
+    mapping = {
+        "EUR/USD": ("DX-Y.NYB", "DXY (Dollar Index)", True), # True = Inverse correlation
+        "GBP/USD": ("DX-Y.NYB", "DXY (Dollar Index)", True),
+        "S&P 500 (E-mini Futures)": ("NQ=F", "Nasdaq 100", False), # False = Direct correlation
+        "S&P 500 (SPY ETF)": ("QQQ", "Nasdaq 100 ETF", False),
+        "Nasdaq 100 (E-mini Futures)": ("ES=F", "S&P 500", False),
+        "Gold (Futures)": ("DX-Y.NYB", "DXY", True)
+    }
+    return mapping.get(asset_name, (None, None, None))
+
+def calculate_seasonal_monthly(ticker):
+    """Calculates average monthly returns over 10 years."""
+    df = yf.download(ticker, period="10y", interval="1mo", progress=False)
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    df = df.reset_index()
+    df['Month'] = df['Date'].dt.month_name()
+    df['Return'] = df['Close'].pct_change()
+    seasonal = df.groupby('Month')['Return'].mean() * 100
+    # Sort by calendar month
+    months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    seasonal = seasonal.reindex(months)
+    return seasonal
+
+def calculate_asian_cbdr_levels(df):
+    """Calculates Asian Range and CBDR levels."""
+    # Logic: Asian Range 19:00 - 00:00 EST | CBDR 14:00 - 20:00 EST (Previous Day)
+    # Simplified for the tool: Asian Range = 8pm - Midnight NY Time
+    
+    df['Time'] = df['Datetime_NY'].dt.time
+    
+    # Asian Range (20:00 - 00:00)
+    asian_mask = (df['Datetime_NY'].dt.hour >= 20) | (df['Datetime_NY'].dt.hour == 0)
+    asian_range = df[asian_mask]
+    
+    levels = {}
+    if not asian_range.empty:
+        levels['Asian_High'] = asian_range['High'].max()
+        levels['Asian_Low'] = asian_range['Low'].min()
+    
+    return levels
+
 # --- SHARED HELPER FUNCTIONS (COT DATA) ---
 
 def clean_headers(df):
@@ -728,7 +780,210 @@ def identify_intraday_profile(df):
 # MAIN LOGIC BRANCHING
 # =========================================
 
-if analysis_mode == "Weekly Protocols (News & Logic)":
+if analysis_mode == "Top Down Analysis (TDA)":
+    
+    st.title(f"📐 Top Down Analysis: {selected_asset_name}")
+    st.markdown("Framework based on **If Then Conditions** moving from Monthly to Intraday.")
+    
+    # Setup Tabs for TDA Flow
+    tab_m, tab_w, tab_d, tab_i = st.tabs(["1. Monthly (Bias)", "2. Weekly (Setup)", "3. Daily (Order Flow)", "4. Intraday (Timing)"])
+    
+    with tab_m:
+        st.subheader("Step 1: Monthly Directional Bias")
+        col_m1, col_m2 = st.columns([2, 1])
+        
+        with col_m1:
+            st.markdown("### 📅 Seasonal Tendency")
+            seasonal = calculate_seasonal_monthly(ticker_symbol)
+            fig_seas = px.bar(seasonal, x=seasonal.index, y='Return', title="10-Year Average Monthly Returns",
+                             color='Return', color_continuous_scale=[THEME['bearish'], THEME['bullish']])
+            fig_seas = apply_theme(fig_seas)
+            st.plotly_chart(fig_seas, use_container_width=True)
+            
+            curr_month = datetime.now().strftime("%B")
+            curr_val = seasonal[curr_month]
+            
+            if curr_val > 0:
+                st.info(f"**Seasonality:** {curr_month} is historically **BULLISH** ({curr_val:.2f}% avg).")
+            else:
+                st.info(f"**Seasonality:** {curr_month} is historically **BEARISH** ({curr_val:.2f}% avg).")
+        
+        with col_m2:
+            st.markdown("### 🏦 Interest Rate Logic")
+            # Using 10Y Yield as proxy for "Bonds" mentioned in PDF
+            try:
+                tnx = yf.download("^TNX", period="1mo", progress=False)
+                last_yield = tnx['Close'].iloc[-1].item()
+                prev_yield = tnx['Close'].iloc[0].item()
+                yield_diff = last_yield - prev_yield
+                
+                st.metric("US 10Y Yield", f"{last_yield:.2f}%", f"{yield_diff:.2f}%")
+                if yield_diff > 0:
+                    st.write("**Rates Rising:** Generally Bearish for Bonds/Gold, Bullish for USD.")
+                else:
+                    st.write("**Rates Falling:** Generally Bullish for Bonds/Gold, Bearish for USD.")
+            except:
+                st.warning("Bond Yield Data Unavailable.")
+                
+            st.divider()
+            st.markdown("### 🎯 PD Arrays (Monthly)")
+            # Calculate simple PD Arrays (Premium/Discount of last 12 months)
+            m_df = yf.download(ticker_symbol, period="1y", interval="1mo", progress=False)
+            if not m_df.empty:
+                if isinstance(m_df.columns, pd.MultiIndex): m_df.columns = m_df.columns.get_level_values(0)
+                m_high = m_df['High'].max()
+                m_low = m_df['Low'].min()
+                m_curr = m_df['Close'].iloc[-1].item()
+                eq = (m_high + m_low) / 2
+                
+                st.metric("Premium High", f"{m_high:.2f}")
+                st.metric("Discount Low", f"{m_low:.2f}")
+                
+                if m_curr > eq:
+                    st.error(f"Price is in **PREMIUM** ")
+                    st.caption("Look for Short setups or Reversals.")
+                else:
+                    st.success(f"Price is in **DISCOUNT** ")
+                    st.caption("Look for Long setups.")
+
+    with tab_w:
+        st.subheader("Step 2: Weekly Setup & Sentiment")
+        
+        # 1. Weekly Data
+        w_df = get_data_weekly(ticker_symbol, weeks=52)
+        if w_df is not None:
+            # Calculate Williams %R (Sentiment)
+            w_df = calculate_williams_r(w_df)
+            last_w = w_df.iloc[-1]
+            wr = last_w['WilliamsR']
+            
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("#### Market Sentiment (Williams %R)")
+                st.metric("Williams %R", f"{wr:.1f}")
+                if wr > -20:
+                    st.warning("⚠️ Overbought (Contrarian Sell)")
+                elif wr < -80:
+                    st.success("⚠️ Oversold (Contrarian Buy)")
+                else:
+                    st.info("Neutral")
+                    
+            with c2:
+                st.markdown("#### Relative Strength (SMT)")
+                smt_ticker, smt_name, inverse = get_smt_pair(selected_asset_name)
+                if smt_ticker:
+                    smt_data = get_data_weekly(smt_ticker, weeks=4)
+                    if smt_data is not None:
+                        curr_ret = w_df['Close'].pct_change().iloc[-1]
+                        smt_ret = smt_data['Close'].pct_change().iloc[-1]
+                        
+                        st.metric(f"vs {smt_name}", f"{smt_ret*100:.2f}%")
+                        
+                        divergence = False
+                        if inverse:
+                            # If inverse (e.g. EURUSD vs DXY), they should move opposite.
+                            # Divergence if both move SAME direction.
+                            if (curr_ret > 0 and smt_ret > 0) or (curr_ret < 0 and smt_ret < 0):
+                                divergence = True
+                        else:
+                            # If direct (e.g. ES vs NQ), they should move same.
+                            # Divergence if they move OPPOSITE.
+                            if (curr_ret > 0 and smt_ret < 0) or (curr_ret < 0 and smt_ret > 0):
+                                divergence = True
+                                
+                        if divergence:
+                            st.warning(f"**SMT DIVERGENCE DETECTED**")
+                            st.markdown("")
+                        else:
+                            st.write("Correlation Intact.")
+                else:
+                    st.write("No SMT pair configured.")
+
+            with c3:
+                st.markdown("#### Market Structure")
+                st.write(f"**Last Close:** {last_w['Close']:.2f}")
+                if last_w['Close'] > w_df.iloc[-2]['High']:
+                    st.success("Broke Previous Week High")
+                elif last_w['Close'] < w_df.iloc[-2]['Low']:
+                    st.error("Broke Previous Week Low")
+                else:
+                    st.write("Inside Week")
+
+    with tab_d:
+        st.subheader("Step 3: Daily Institutional Order Flow")
+        
+        d_df = yf.download(ticker_symbol, period="1mo", interval="1d", progress=False)
+        if not d_df.empty:
+            if isinstance(d_df.columns, pd.MultiIndex): d_df.columns = d_df.columns.get_level_values(0)
+            
+            # Analyze last 3 candles for Order Flow
+            last_3 = d_df.tail(3)
+            
+            col_d1, col_d2 = st.columns(2)
+            
+            with col_d1:
+                st.markdown("#### Order Flow Analysis")
+                closes = last_3['Close'].values
+                opens = last_3['Open'].values
+                
+                for i in range(len(closes)):
+                    date = last_3.index[i].date()
+                    c = closes[i]
+                    o = opens[i]
+                    if c > o:
+                        st.write(f"📅 {date}: **Up Close** (Bullish Order Block Potential)")
+                    else:
+                        st.write(f"📅 {date}: **Down Close** (Bearish Order Block Potential)")
+                        
+                st.info("**Logic:** Bullish IOF breaks Up Close candles. Bearish IOF breaks Down Close candles.")
+            
+            with col_d2:
+                st.markdown("#### Open Interest Proxy (Volume)")
+                # Using Volume as OI isn't always available
+                vol = last_3['Volume'].iloc[-1]
+                avg_vol = d_df['Volume'].mean()
+                
+                st.metric("Volume", f"{vol:,}")
+                if vol > avg_vol * 1.2:
+                    st.write("**High Activity:** Professionals may be positioning.")
+                else:
+                    st.write("**Low Activity:** Lack of conviction.")
+                    
+                st.caption("*Note: True OI requires Futures Data feed.*")
+                
+            fig_d = go.Figure(data=[go.Candlestick(x=d_df.index, open=d_df['Open'], high=d_df['High'], low=d_df['Low'], close=d_df['Close'], increasing_line_color=THEME['bullish'], decreasing_line_color=THEME['bearish'])])
+            fig_d.update_layout(height=400, title="Daily Chart")
+            fig_d = apply_theme(fig_d)
+            st.plotly_chart(fig_d, use_container_width=True)
+
+    with tab_i:
+        st.subheader("Step 4: Intraday Timing (Execution)")
+        
+        st.markdown("**If/Then Conditions:**")
+        st.markdown("1. **IF** Bullish Bias (from Monthly/Weekly) -> **THEN** Buy below Asian Range (London/NY).")
+        st.markdown("2. **IF** Bearish Bias (from Monthly/Weekly) -> **THEN** Sell above Asian Range (London/NY).")
+        
+        df_intra = get_data_intraday(ticker_symbol, datetime.now().date())
+        
+        if df_intra is not None and not df_intra.empty:
+            levels = calculate_asian_cbdr_levels(df_intra)
+            
+            fig_i = go.Figure()
+            fig_i.add_trace(go.Candlestick(x=df_intra['Datetime_NY'], open=df_intra['Open'], high=df_intra['High'], low=df_intra['Low'], close=df_intra['Close'], name="Price"))
+            
+            if 'Asian_High' in levels:
+                fig_i.add_hline(y=levels['Asian_High'], line_dash="dash", line_color="orange", annotation_text="Asian High")
+                fig_i.add_hline(y=levels['Asian_Low'], line_dash="dash", line_color="orange", annotation_text="Asian Low", annotation_position="bottom right")
+                
+                st.success(f"**Asian Range:** {levels['Asian_Low']:.2f} - {levels['Asian_High']:.2f}")
+            
+            fig_i = apply_theme(fig_i)
+            st.plotly_chart(fig_i, use_container_width=True)
+            
+        else:
+            st.warning("No Intraday data available for today yet.")
+
+elif analysis_mode == "Weekly Protocols (News & Logic)":
     
     st.sidebar.subheader("Protocol Settings")
     sim_mode = st.sidebar.checkbox("Simulate Jan 3-9, 2026 Context", value=True, help="Forces the logic to run on the specific date mentioned.")
