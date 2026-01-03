@@ -1,6 +1,9 @@
 streamlit
 yfinance
 pandas
+numpy
 plotly
-cot_reports
 scikit-learn
+requests
+beautifulsoup4
+cot_reports
