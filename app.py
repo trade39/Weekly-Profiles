@@ -12,7 +12,7 @@ import re
 
 # ML Imports
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.metrics import accuracy_score, classification_report
 
 # --- PAGE CONFIGURATION ---
@@ -180,14 +180,16 @@ ticker_symbol = asset_map[selected_asset_name]
 def scrape_forex_factory(week="this"):
     """
     Scrapes Forex Factory Calendar for High Impact (Red) News.
+    UPDATE 1: Added Headers and better error handling.
     """
     url = f"https://www.forexfactory.com/calendar?week={week}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
     }
     
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             return pd.DataFrame()
             
@@ -265,7 +267,10 @@ def determine_weekly_protocol(ff_df, stories, manual_override_date=None):
     day_name = today.strftime("%A")
     
     # 2. Analyze News Clustering (USD High Impact)
-    usd_news = ff_df[ff_df['Currency'] == 'USD'] if not ff_df.empty else pd.DataFrame()
+    if ff_df is not None and not ff_df.empty:
+        usd_news = ff_df[ff_df['Currency'] == 'USD']
+    else:
+        usd_news = pd.DataFrame()
     
     clustering = "Minimal/None"
     red_folder_days = []
@@ -376,21 +381,33 @@ def get_data_weekly(ticker, weeks=52):
         return None
 
 def get_data_intraday(ticker, target_date, interval="5m"):
-    """Fetches intraday data. Interval can be 5m (Intraday) or 15m (OSOK)."""
+    """
+    Fetches intraday data. Interval can be 5m (Intraday) or 15m (OSOK).
+    UPDATE 4: Standardized Timezone Handling (UTC to NY).
+    """
     start_date = target_date - timedelta(days=2) 
     end_date = target_date + timedelta(days=2)
     
     try:
         data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False)
         if data.empty: return None
+        
+        # Flatten MultiIndex
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         data = data.reset_index()
         
+        # Robust Timezone Logic
         if data['Datetime'].dt.tz is None:
+            # Assume UTC if naive
             data['Datetime'] = data['Datetime'].dt.tz_localize('UTC')
+        else:
+            # Convert to UTC to ensure baseline
+            data['Datetime'] = data['Datetime'].dt.tz_convert('UTC')
         
+        # Convert to NY for ICT Analysis
         data['Datetime_NY'] = data['Datetime'].dt.tz_convert('America/New_York')
         
+        # Strict Date Filtering on NY Time
         mask = data['Datetime_NY'].dt.date == target_date
         return data.loc[mask].copy()
     except Exception as e:
@@ -406,26 +423,39 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def prepare_osok_ml_data(df):
+    """
+    UPDATE 2: Enhanced Feature Engineering (Trend, Seasonality, Volatility).
+    """
     # Group by week to get weekly OHLC
     logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
     w_df = df.groupby('Week_Start').agg(logic).sort_index()
     
-    # Feature Engineering
+    # --- FEATURES ---
+    
+    # 1. Price Structure (PD Arrays)
     w_df['20W_High'] = w_df['High'].rolling(window=20).max()
     w_df['20W_Low'] = w_df['Low'].rolling(window=20).min()
     w_df['Equilibrium'] = (w_df['20W_High'] + w_df['20W_Low']) / 2
-    
-    # Feature 1: PD Factor (0 = Deep Discount, 1 = Deep Premium)
     w_df['PD_Factor'] = (w_df['Close'] - w_df['20W_Low']) / (w_df['20W_High'] - w_df['20W_Low'])
-    
-    # Feature 2: Distance from Equilibrium (%)
     w_df['Dist_Eq'] = (w_df['Close'] - w_df['Equilibrium']) / w_df['Equilibrium']
     
-    # Feature 3: RSI (Momentum)
+    # 2. Momentum
     w_df['RSI'] = calculate_rsi(w_df['Close'], 14)
-    
-    # Feature 4: Previous Week Return
     w_df['Prev_Ret'] = w_df['Close'].pct_change()
+    
+    # 3. Trend Filters (NEW)
+    w_df['SMA_20'] = w_df['Close'].rolling(window=20).mean()
+    w_df['SMA_50'] = w_df['Close'].rolling(window=50).mean()
+    w_df['Trend_Bullish'] = (w_df['SMA_20'] > w_df['SMA_50']).astype(int)
+    
+    # 4. Seasonality (NEW)
+    w_df['Month'] = w_df.index.month
+    
+    # 5. Volatility (NEW - ATR)
+    w_df['TR'] = np.maximum(w_df['High'] - w_df['Low'], 
+                            np.abs(w_df['High'] - w_df['Close'].shift(1)))
+    w_df['ATR'] = w_df['TR'].rolling(window=14).mean()
+    w_df['Volatility'] = w_df['ATR'] / w_df['Close']
     
     # TARGET: Will NEXT week close higher than it opens? (Bullish Candle)
     w_df['Target'] = (w_df['Close'].shift(-1) > w_df['Open'].shift(-1)).astype(int)
@@ -434,7 +464,10 @@ def prepare_osok_ml_data(df):
     return w_df
 
 def train_osok_model(ml_df):
-    feature_cols = ['PD_Factor', 'Dist_Eq', 'RSI', 'Prev_Ret']
+    """
+    UPDATE 2: Updated Feature Columns for training.
+    """
+    feature_cols = ['PD_Factor', 'Dist_Eq', 'RSI', 'Prev_Ret', 'Trend_Bullish', 'Month', 'Volatility']
     X = ml_df[feature_cols]
     y = ml_df['Target']
     
@@ -513,6 +546,9 @@ def predict_next_week(stats_df, current_profile):
     return dict(sorted(counts.to_dict().items(), key=lambda item: item[1], reverse=True))
 
 def identify_intraday_profile(df):
+    """
+    UPDATE 3: Added Displacement Threshold logic to reduce false positive Judas Swings.
+    """
     if df.empty: return None
     midnight_bar = df[df['Datetime_NY'].dt.hour == 0]
     if midnight_bar.empty: midnight_open = df.iloc[0]['Open']
@@ -529,13 +565,27 @@ def identify_intraday_profile(df):
     high_time = df.loc[df['High'].idxmax(), 'Datetime_NY'].time()
     low_time = df.loc[df['Low'].idxmin(), 'Datetime_NY'].time()
     
+    # Displacement Threshold (10% of total range)
+    day_range = day_high - day_low
+    threshold = day_range * 0.10
+    
     profile, desc = "Consolidation", "Choppy."
     
     if is_bullish:
-        if judas_start <= low_time <= judas_end: profile, desc = "London Normal (Buy)", "Judas Swing Low (0-2 AM)."
+        if judas_start <= low_time <= judas_end: 
+            # Check displacement: price must be significantly above the low
+            if (current_price - day_low) > threshold:
+                profile, desc = "London Normal (Buy)", "Judas Swing Low (0-2 AM) with Displacement."
+            else:
+                profile, desc = "Weak London", "Low formed in KZ, but no expansion yet."
         elif low_time > judas_end: profile, desc = "London Delayed (Buy)", "Low formed after 2 AM."
     else:
-        if judas_start <= high_time <= judas_end: profile, desc = "London Normal (Sell)", "Judas Swing High (0-2 AM)."
+        if judas_start <= high_time <= judas_end: 
+            # Check displacement: price must be significantly below the high
+            if (day_high - current_price) > threshold:
+                profile, desc = "London Normal (Sell)", "Judas Swing High (0-2 AM) with Displacement."
+            else:
+                profile, desc = "Weak London", "High formed in KZ, but no expansion yet."
         elif high_time > judas_end: profile, desc = "London Delayed (Sell)", "High formed after 2 AM."
 
     return {"Trend": trend, "Profile": profile, "Description": desc, "Midnight_Open": midnight_open, "High": day_high, "Low": day_low, "High_Time": high_time, "Low_Time": low_time}
@@ -601,12 +651,12 @@ if analysis_mode == "Weekly Protocols (News & Logic)":
     
     with col_d1:
         st.subheader("📰 Economic Calendar (High Impact)")
-        if not ff_df.empty:
+        if ff_df is not None and not ff_df.empty:
             # Formatting for display
             display_df = ff_df[['Date', 'Time', 'Currency', 'Event']].copy()
             st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No High Impact (Red Folder) USD events scheduled for this period.")
+            st.info("No High Impact (Red Folder) USD events scheduled for this period (or fetch failed).")
             
     with col_d2:
         st.subheader("📢 Hottest Stories (Sentiment)")
@@ -828,6 +878,10 @@ elif analysis_mode == "Intraday Profiles":
 elif analysis_mode == "One Shot One Kill (OSOK)":
     
     st.sidebar.subheader("OSOK Settings")
+    
+    # UPDATE 5: OTE Anchor Selection
+    ote_anchor = st.sidebar.radio("OTE Fib Anchor", ["Current Day Range", "Previous Week Range"], help="Determines the High/Low used for the OTE Fib calculation.")
+    
     st.title("🎯 One Shot One Kill (OSOK) + ML Model")
     st.markdown("Identifies the **20-Week Dealing Range** and uses **Machine Learning** to predict the bias.")
 
@@ -868,8 +922,9 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
             st.markdown("""
             **How this ML Model works:**
             1. **Feature Extraction:** It calculates where price is within the 20-week range (Premium/Discount factor).
-            2. **Momentum:** It checks RSI and recent weekly returns.
-            3. **Target:** It trains a Random Forest to predict if the *Next Week* closes higher than it opens.
+            2. **Momentum:** RSI and recent weekly returns.
+            3. **Trend/Seasonality:** Checks 20 vs 50 EMA and current Month.
+            4. **Target:** Trains a Random Forest to predict if the *Next Week* closes higher than it opens.
             """)
         
         # Prepare Data
@@ -938,8 +993,14 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
                 decreasing_line_color=THEME['bearish']
             ))
             
-            view_high = df_15m['High'].max()
-            view_low = df_15m['Low'].min()
+            # Determine View Range based on User Toggle
+            if ote_anchor == "Previous Week Range":
+                view_high = ipda_high
+                view_low = ipda_low
+            else:
+                view_high = df_15m['High'].max()
+                view_low = df_15m['Low'].min()
+                
             diff = view_high - view_low
             
             if in_premium:
@@ -953,6 +1014,7 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
                 color_ote = THEME['bullish']
                 bias_text = "Bullish OTE Zone (Buy)"
             
+            # Ensure OTE zone is visible within current chart limits if using external anchor
             fig_osok.add_hrect(y0=ote_62, y1=ote_79, fillcolor=color_ote, opacity=0.1, annotation_text=bias_text, annotation_position="right")
             
             base_dt_osok = pd.to_datetime(target_date_osok).tz_localize('America/New_York') if df_15m['Datetime_NY'].iloc[0].tzinfo else pd.to_datetime(target_date_osok)
