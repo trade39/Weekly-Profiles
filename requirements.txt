@@ -4,6 +4,7 @@ pandas
 numpy
 plotly
 scikit-learn
-requests
 beautifulsoup4
-cot_reports
+requests
+pytz
+cot-reports
