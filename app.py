@@ -1,14 +1,20 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta, time
 import pytz
 
+# ML Imports
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="ICT Profiles Analyzer",
+    page_title="ICT Profiles Analyzer + ML",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,12 +26,12 @@ st.sidebar.title("Configuration")
 analysis_mode = st.sidebar.radio(
     "Analysis Mode", 
     ["Weekly Profiles", "Intraday Profiles", "One Shot One Kill (OSOK)"], 
-    help="Weekly: Swing profiles + Prediction. Intraday: London Protraction. OSOK: 20-Week IPDA Range."
+    help="Weekly: Swing profiles. Intraday: London Protraction. OSOK: 20-Week Range + ML Prediction."
 )
 
 # 2. Fallback Toggle
 use_etf = st.sidebar.checkbox("Use ETF Tickers (More Stable)", value=False, 
-    help="Check this if Futures data (ES=F, GC=F) fails to load. ETFs (SPY, GLD) are more reliable on the free API.")
+    help="Check this if Futures data (ES=F, GC=F) fails to load.")
 
 # 3. Asset Selection
 if use_etf:
@@ -54,12 +60,11 @@ ticker_symbol = asset_map[selected_asset_name]
 
 def get_data_weekly(ticker, weeks=52):
     """Fetches daily data for Weekly Analysis."""
-    # OPTIMIZATION: Always fetch at least 5 years (260 weeks) to ensure 
-    # the Prediction Engine has enough data points.
-    min_history_weeks = 260 
+    # Ensure enough data for ML training (at least 5 years)
+    min_history_weeks = 300 
     fetch_weeks = max(weeks, min_history_weeks)
     
-    period_days = fetch_weeks * 7 + 21
+    period_days = fetch_weeks * 7 + 30
     end_date = datetime.now()
     start_date = end_date - timedelta(days=period_days)
     
@@ -69,6 +74,7 @@ def get_data_weekly(ticker, weeks=52):
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         data = data.reset_index()
         data['Date'] = pd.to_datetime(data['Date'])
+        # Adjust to start of week (Monday)
         data['Week_Start'] = data['Date'].apply(lambda x: x - timedelta(days=x.weekday()))
         return data
     except Exception as e:
@@ -96,6 +102,65 @@ def get_data_intraday(ticker, target_date, interval="5m"):
     except Exception as e:
         st.error(f"Error fetching intraday data: {e}")
         return None
+
+# --- ML HELPER FUNCTIONS ---
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def prepare_osok_ml_data(df):
+    """
+    Prepares features specifically based on OSOK concepts:
+    - 20 Week Range Position (Premium/Discount)
+    - Distance from Equilibrium
+    - Recent Momentum
+    """
+    # Group by week to get weekly OHLC
+    logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+    w_df = df.groupby('Week_Start').agg(logic).sort_index()
+    
+    # Feature Engineering
+    w_df['20W_High'] = w_df['High'].rolling(window=20).max()
+    w_df['20W_Low'] = w_df['Low'].rolling(window=20).min()
+    w_df['Equilibrium'] = (w_df['20W_High'] + w_df['20W_Low']) / 2
+    
+    # Feature 1: PD Factor (0 = Deep Discount, 1 = Deep Premium)
+    w_df['PD_Factor'] = (w_df['Close'] - w_df['20W_Low']) / (w_df['20W_High'] - w_df['20W_Low'])
+    
+    # Feature 2: Distance from Equilibrium (%)
+    w_df['Dist_Eq'] = (w_df['Close'] - w_df['Equilibrium']) / w_df['Equilibrium']
+    
+    # Feature 3: RSI (Momentum)
+    w_df['RSI'] = calculate_rsi(w_df['Close'], 14)
+    
+    # Feature 4: Previous Week Return
+    w_df['Prev_Ret'] = w_df['Close'].pct_change()
+    
+    # TARGET: Will NEXT week close higher than it opens? (Bullish Candle)
+    # Shift(-1) looks at the future
+    w_df['Target'] = (w_df['Close'].shift(-1) > w_df['Open'].shift(-1)).astype(int)
+    
+    w_df = w_df.dropna()
+    return w_df
+
+def train_osok_model(ml_df):
+    feature_cols = ['PD_Factor', 'Dist_Eq', 'RSI', 'Prev_Ret']
+    X = ml_df[feature_cols]
+    y = ml_df['Target']
+    
+    # Split Data (Shuffle=False for time series to test on latest data)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    
+    model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    model.fit(X_train, y_train)
+    
+    preds = model.predict(X_test)
+    acc = accuracy_score(y_test, preds)
+    
+    return model, acc, feature_cols
 
 # --- WEEKLY ANALYSIS FUNCTIONS ---
 def identify_weekly_profile(week_df):
@@ -374,14 +439,16 @@ elif analysis_mode == "Intraday Profiles":
 elif analysis_mode == "One Shot One Kill (OSOK)":
     
     st.sidebar.subheader("OSOK Settings")
-    st.title("🎯 One Shot One Kill (OSOK) Model")
-    st.markdown("Identifies the **20-Week Dealing Range** and potential **OTE Setups**.")
+    st.title("🎯 One Shot One Kill (OSOK) + ML Model")
+    st.markdown("Identifies the **20-Week Dealing Range** and uses **Machine Learning** to predict the bias.")
 
     with st.spinner("Analyzing 20-Week IPDA Range..."):
-        df_weekly = get_data_weekly(ticker_symbol, weeks=25)
+        # Fetch lots of data for ML training
+        df_full = get_data_weekly(ticker_symbol, weeks=300)
     
-    if df_weekly is not None:
-        df_weekly = df_weekly.sort_values('Date')
+    if df_full is not None:
+        # Separate data for OSOK Visuals
+        df_weekly = df_full.sort_values('Date')
         last_20 = df_weekly.iloc[-21:-1]
         current_week = df_weekly.iloc[-1]
         
@@ -402,7 +469,56 @@ elif analysis_mode == "One Shot One Kill (OSOK)":
         st.progress((current_close - ipda_low) / ipda_range)
         st.caption(f"Price is at {((current_close - ipda_low) / ipda_range)*100:.1f}% of the 20-week range.")
 
+        # --- ML MODEL INTEGRATION ---
         st.divider()
+        st.subheader("🤖 OSOK ML Probability Engine")
+        
+        with st.expander("View ML Model Logic"):
+            st.markdown("""
+            **How this ML Model works:**
+            1. **Feature Extraction:** It calculates where price is within the 20-week range (Premium/Discount factor).
+            2. **Momentum:** It checks RSI and recent weekly returns.
+            3. **Target:** It trains a Random Forest to predict if the *Next Week* closes higher than it opens.
+            """)
+        
+        # Prepare Data
+        ml_df = prepare_osok_ml_data(df_full)
+        
+        if len(ml_df) > 50:
+            # Train Model
+            model, acc, feats = train_osok_model(ml_df)
+            
+            # Predict for Current/Next Week
+            # We take the latest known row to predict the future
+            latest_features = ml_df.iloc[[-1]][feats]
+            pred_prob = model.predict_proba(latest_features)[0] # [Prob Bearish, Prob Bullish]
+            
+            ml_c1, ml_c2 = st.columns(2)
+            
+            with ml_c1:
+                st.metric("Model Backtest Accuracy", f"{acc*100:.1f}%")
+                bias_score = pred_prob[1] # Probability of Bullish
+                
+                if bias_score > 0.55:
+                    st.success(f"**ML Bias: BULLISH ({bias_score*100:.1f}%)**")
+                elif bias_score < 0.45:
+                    st.error(f"**ML Bias: BEARISH ({(1-bias_score)*100:.1f}%)**")
+                else:
+                    st.warning(f"**ML Bias: NEUTRAL / CHOPPY**")
+                    
+            with ml_c2:
+                # Feature Importance
+                importances = pd.DataFrame({'Feature': feats, 'Importance': model.feature_importances_})
+                fig_imp = px.bar(importances, x='Importance', y='Feature', orientation='h', title="Factor Importance")
+                fig_imp.update_layout(template="plotly_dark", height=200, margin=dict(l=0, r=0, t=30, b=0))
+                st.plotly_chart(fig_imp, use_container_width=True)
+                
+        else:
+            st.warning("Not enough historical data to train the OSOK ML model reliably.")
+
+        st.divider()
+        # --- END ML INTEGRATION ---
+
         st.subheader("Execution: 15m OTE Setup")
         
         today = datetime.now().date()
@@ -466,11 +582,11 @@ if st.sidebar.button("Scan All Assets"):
             if analysis_mode == "One Shot One Kill (OSOK)":
                  d = get_data_weekly(tk, 25)
                  if d is not None:
-                     last_20 = d.iloc[-21:-1]
-                     curr = d.iloc[-1]['Close']
-                     high, low = last_20['High'].max(), last_20['Low'].min()
-                     state = "Premium (Sell)" if curr > (high+low)/2 else "Discount (Buy)"
-                     results.append({"Asset": name, "Type": "OSOK", "State": state, "20-Wk High": high, "20-Wk Low": low})
+                      last_20 = d.iloc[-21:-1]
+                      curr = d.iloc[-1]['Close']
+                      high, low = last_20['High'].max(), last_20['Low'].min()
+                      state = "Premium (Sell)" if curr > (high+low)/2 else "Discount (Buy)"
+                      results.append({"Asset": name, "Type": "OSOK", "State": state, "20-Wk High": high, "20-Wk Low": low})
             elif analysis_mode == "Weekly Profiles":
                 d = get_data_weekly(tk, 4)
                 if d is not None:
